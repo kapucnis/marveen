@@ -1795,9 +1795,11 @@ export function markPendingTaskRetryAlert(taskName: string, agentName: string, t
     .run(ts, taskName, agentName).changes > 0
 }
 
-// --- Vector Search (Ollama + nomic-embed-text) ---
-
-const EMBED_MODEL = 'nomic-embed-text'
+// --- Vector Search (Ollama + bge-m3) ---
+// bge-m3: multilingual (magyar) embedding, 1024 dim, hosszu kontextus.
+// Benchmark (2026-07-10, 12 magyar lekerdezes): bge-m3 MRR 0.603 vs
+// nomic-embed-text 0.279 -- a nomic angol-kozpontu, magyarra rosszul rangsorol.
+const EMBED_MODEL = 'bge-m3'
 
 export async function generateEmbedding(text: string): Promise<number[] | null> {
   try {

@@ -8,6 +8,7 @@ export type TargetKind =
   | 'local-skill'
   | 'guard-token'
   | 'guard-log'
+  | 'guard-consumed'
 
 export interface Roots {
   home?: string
@@ -38,7 +39,10 @@ export interface Decision {
   deny: boolean
   why?: string
   audit?: boolean
+  consumeNonce?: string
 }
+
+export type Consumed = Set<string> | string[]
 
 export function splitSegments(command: string): string[]
 export function stripHeredocBodies(command: string): string
@@ -46,11 +50,14 @@ export function stripDataPayloads(seg: string): string
 export function classifyTarget(realPath: string, roots?: Roots): TargetKind | null
 export function globToRegExp(glob: string): RegExp
 export function parseApproval(raw: string): Grant[]
-export function approvalCovers(grants: Grant[], realPath: string, now: number): boolean
+export function parseConsumed(raw: string): Set<string>
+export function matchingGrant(grants: Grant[], realPath: string, now: number, consumed?: Consumed): Grant | null
+export function approvalCovers(grants: Grant[], realPath: string, now: number, consumed?: Consumed): boolean
 export function evaluate(args: {
   kind: TargetKind | null
   realPath: string
   grants: Grant[]
+  consumed?: Consumed
   now: number
 }): Decision
 export function bashSkillTargets(command: string, roots?: Roots): SkillTargetHit[]

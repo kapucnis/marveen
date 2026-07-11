@@ -5,6 +5,8 @@ import {
   classifyTarget,
   globToRegExp,
   approvalCovers,
+  matchingGrant,
+  parseConsumed,
   evaluate,
   bashSkillTargets,
   stripHeredocBodies,
@@ -124,6 +126,39 @@ describe('bashSkillTargets', () => {
     const cmd = "cat <<'EOF' > /tmp/report.txt\nI wrote to /h/.claude/skills/evil/SKILL.md\nEOF"
     // the only real write target here is /tmp/report.txt (not a skill) -> no hits
     expect(bashSkillTargets(cmd, ROOTS)).toHaveLength(0)
+  })
+})
+
+describe('one-time nonce (token-replay defense)', () => {
+  const grant = { nonce: 'n1', expiresAt: NOW + HOUR, pathGlob: '**/skills/**' }
+  it('parseConsumed reads a newline-delimited ledger into a Set', () => {
+    const s = parseConsumed('a\n b \n\nc\n')
+    expect([...s].sort()).toEqual(['a', 'b', 'c'])
+  })
+  it('matchingGrant returns the grant when the nonce is fresh', () => {
+    expect(matchingGrant([grant], '/h/.claude/skills/x/SKILL.md', NOW, [])?.nonce).toBe('n1')
+  })
+  it('matchingGrant rejects an already-consumed nonce', () => {
+    expect(matchingGrant([grant], '/h/.claude/skills/x/SKILL.md', NOW, new Set(['n1']))).toBeNull()
+  })
+  it('matchingGrant rejects a grant with no nonce (not one-time-enforceable)', () => {
+    const noNonce = { expiresAt: NOW + HOUR, pathGlob: '**/skills/**' } as any
+    expect(matchingGrant([noNonce], '/h/.claude/skills/x/SKILL.md', NOW, [])).toBeNull()
+  })
+  it('approvalCovers honors the consumed set', () => {
+    expect(approvalCovers([grant], '/h/.claude/skills/x/SKILL.md', NOW, [])).toBe(true)
+    expect(approvalCovers([grant], '/h/.claude/skills/x/SKILL.md', NOW, ['n1'])).toBe(false)
+  })
+  it('evaluate reports the nonce to consume on allow, and denies once spent', () => {
+    const ok = evaluate({ kind: 'global-skill', realPath: '/h/.claude/skills/x/SKILL.md', grants: [grant], consumed: [], now: NOW })
+    expect(ok.deny).toBe(false)
+    expect(ok.consumeNonce).toBe('n1')
+    const spent = evaluate({ kind: 'global-skill', realPath: '/h/.claude/skills/y/SKILL.md', grants: [grant], consumed: ['n1'], now: NOW })
+    expect(spent.deny).toBe(true)
+  })
+  it('blocks writes to the consumed ledger itself', () => {
+    expect(classifyTarget('/r/store/.skill-write-consumed', ROOTS)).toBe('guard-consumed')
+    expect(evaluate({ kind: 'guard-consumed', realPath: '/r/store/.skill-write-consumed', grants: [], consumed: [], now: NOW }).deny).toBe(true)
   })
 })
 

@@ -40,6 +40,21 @@
 // break a tool call we cannot classify), a guard-logic error FAILS CLOSED
 // (block until fixed). Decisions logged to store/self-audit/guard.log.
 //
+// HARDENING (Yoda adversarial review 2026-07-11):
+//   - SYMLINK: resolveReal() runs realpathSync AT HOOK TIME, so a write aimed
+//     through a symlink into the skills tree resolves to the REAL skills path
+//     and is classified/denied correctly (verified by Yoda's own isolated
+//     probe). The only residual is a CONCURRENT symlink swap performed BETWEEN
+//     the resolve and the actual write -- that requires a running Bash process,
+//     which K3 removes from the external-content agent; K1 does not (and cannot
+//     race-freely) defend it. Documented, not code.
+//   - TOKEN-REPLAY: approval grants are ONE-TIME. A grant's nonce is spent into
+//     store/.skill-write-consumed on first use (matchingGrant skips any spent
+//     nonce), so a single wide-glob/future-expiry grant can authorize exactly
+//     one write, not many. (Gap found by Yoda: the token was time-windowed, not
+//     single-use.) The consumed ledger is a guard-own file: agent tool-writes
+//     to it are blocked like the token/audit-log.
+//
 // TEST HOOKS (never agent-controllable -- the hook runs in a process Claude
 // Code spawns, not in the agent's shell; a Bash tool's own command runs only
 // AFTER this hook allows it, and Write/Edit have no shell at all): the two root
@@ -59,6 +74,7 @@ const GLOBAL_SKILLS_DIR = `${HOME}/.claude/skills`
 const SCHEDULED_TASKS_DIR = `${HOME}/.claude/scheduled-tasks`
 const APPROVAL_PATH = `${MARVEEN_ROOT}/store/.skill-write-approval`
 const AUDIT_LOG_PATH = `${MARVEEN_ROOT}/store/skill-audit.log`
+const CONSUMED_PATH = `${MARVEEN_ROOT}/store/.skill-write-consumed`
 const GUARD_LOG_PATH = `${MARVEEN_ROOT}/store/self-audit/guard.log`
 
 // --- best-effort agent tag (LOGGING ONLY, never a security decision) --------
@@ -137,10 +153,12 @@ export function classifyTarget(realPath, roots = {}) {
   const scheduled = `${home}/.claude/scheduled-tasks`
   const approval = `${root}/store/.skill-write-approval`
   const auditLog = `${root}/store/skill-audit.log`
+  const consumed = `${root}/store/.skill-write-consumed`
   const p = String(realPath ?? '')
   if (!p) return null
   if (p === approval) return 'guard-token'
   if (p === auditLog) return 'guard-log'
+  if (p === consumed) return 'guard-consumed'
   if (p === globalSkills || p.startsWith(globalSkills + '/')) return 'global-skill'
   if (p === scheduled || p.startsWith(scheduled + '/')) return 'scheduled-task'
   // Agent-own skills: …/agents/<name>/.claude/skills/**
@@ -184,30 +202,51 @@ function grantExpiry(g) {
   return 0
 }
 
-// A grant covers a path if it is unexpired AND its glob matches the path.
-export function approvalCovers(grants, realPath, now) {
+// Consumed-nonce ledger: newline-delimited nonce strings (append-only). The
+// guard maintains it via its own fs append (NOT a tool call), the same way it
+// maintains the audit log -- so an agent can neither read-around nor forge it.
+export function parseConsumed(raw) {
+  return new Set(String(raw ?? '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean))
+}
+
+// The first grant that ACTUALLY authorizes this write: has a non-empty nonce
+// (a grant with no nonce is not one-time-enforceable -> unusable), is unexpired,
+// its nonce has NOT already been consumed, and its glob matches the path.
+// Returns the grant (so the caller can consume its nonce) or null.
+export function matchingGrant(grants, realPath, now, consumed) {
+  const used = consumed instanceof Set ? consumed : new Set(consumed || [])
   for (const g of grants || []) {
+    const nonce = typeof g.nonce === 'string' ? g.nonce.trim() : ''
+    if (!nonce) continue                 // no nonce -> cannot enforce one-time use
+    if (used.has(nonce)) continue        // TOKEN-REPLAY: nonce already spent
     if (grantExpiry(g) <= now) continue
     let rx
     try { rx = globToRegExp(g.pathGlob) } catch { continue }
-    if (rx.test(realPath)) return true
+    if (rx.test(realPath)) return g
   }
-  return false
+  return null
+}
+
+// Back-compat boolean wrapper (consumed optional).
+export function approvalCovers(grants, realPath, now, consumed = []) {
+  return matchingGrant(grants, realPath, now, consumed) != null
 }
 
 // --- pure decision ----------------------------------------------------------
 // kind: classifyTarget result; grants: parseApproval result; now: epoch ms.
 // Returns { deny, why?, audit? } where audit=true means "allowed skill write,
 // record it in the audit log".
-export function evaluate({ kind, realPath, grants, now }) {
+export function evaluate({ kind, realPath, grants, consumed, now }) {
   if (!kind) return { deny: false }
-  if (kind === 'guard-token' || kind === 'guard-log') {
-    return { deny: true, why: `a skill-guard sajat ${kind === 'guard-token' ? 'jovahagyas-tokenje' : 'audit-logja'} (${realPath}) tool-hivasbol NEM irhato -- EliteAI provisionalja out-of-band, a guard csak olvassa` }
+  if (kind === 'guard-token' || kind === 'guard-log' || kind === 'guard-consumed') {
+    const which = kind === 'guard-token' ? 'jovahagyas-tokenje' : kind === 'guard-log' ? 'audit-logja' : 'nonce-ledgerje'
+    return { deny: true, why: `a skill-guard sajat ${which} (${realPath}) tool-hivasbol NEM irhato -- EliteAI provisionalja out-of-band, a guard csak olvassa/vezeti` }
   }
   if (kind === 'global-skill' || kind === 'scheduled-task') {
-    if (approvalCovers(grants, realPath, now)) return { deny: false, audit: true }
+    const g = matchingGrant(grants, realPath, now, consumed)
+    if (g) return { deny: false, audit: true, consumeNonce: (g.nonce || '').trim() }
     const label = kind === 'global-skill' ? 'globalis skill (~/.claude/skills/**)' : 'utemezett feladat (~/.claude/scheduled-tasks/**)'
-    return { deny: true, why: `${label} irasa jovahagyas-token nelkul TILTOTT (${realPath}). Kerd EliteAI-tol a store/.skill-write-approval grantot (nonce+lejarat+path-glob), vagy irj a sajat agent-skills mappadba` }
+    return { deny: true, why: `${label} irasa ervenyes (egyszer-hasznalatos, le-nem-jart, meg-nem-konszumalt) jovahagyas-token nelkul TILTOTT (${realPath}). Kerd EliteAI-tol a store/.skill-write-approval grantot (nonce+lejarat+path-glob), vagy irj a sajat agent-skills mappadba` }
   }
   if (kind === 'local-skill') return { deny: false, audit: true }
   return { deny: false }
@@ -261,6 +300,19 @@ function auditLine(agent, tool, path, action, hash) {
     appendFileSync(AUDIT_LOG_PATH, `${new Date().toISOString()}\t${agent}\t${tool}\t${path}\t${action}\t${hash}\n`)
   } catch (err) {
     guardLog('AUDIT-WRITE-FAIL', String(err))
+  }
+}
+
+// Spend approval-grant nonces so they can never authorize a second write
+// (one grant = one write). Same fs-append posture as the audit log -- the
+// guard writes this itself, it is never an agent tool call.
+function appendConsumed(nonces) {
+  const uniq = [...new Set(nonces)].filter(Boolean)
+  if (!uniq.length) return
+  try {
+    appendFileSync(CONSUMED_PATH, uniq.join('\n') + '\n')
+  } catch (err) {
+    guardLog('CONSUME-WRITE-FAIL', String(err))
   }
 }
 
@@ -321,11 +373,12 @@ if (isInvokedDirectly()) {
     allow()
   }
 
-  let targets, grants
+  let targets, grants, consumedSet
   try {
     targets = collectTargets(payload)
     if (targets.length === 0) allow()
     grants = parseApproval(existsSync(APPROVAL_PATH) ? readFileSync(APPROVAL_PATH, 'utf-8') : '')
+    consumedSet = parseConsumed(existsSync(CONSUMED_PATH) ? readFileSync(CONSUMED_PATH, 'utf-8') : '')
   } catch (err) {
     guardLog('GUARD-ERROR', String(err))
     deny('Skill-write guardrail HIBA: a logika hibara futott, ezert ez a muvelet blokkolva van amig ez nincs javitva. Szolj EliteAI-nak.' + GATE_MSG_TAIL)
@@ -334,11 +387,16 @@ if (isInvokedDirectly()) {
   const now = Date.now()
   const agent = currentAgentTag(payload?.cwd)
 
-  // Deny on the FIRST denied target (a single bad path fails the whole call).
+  // Pass 1: evaluate every target with a LIVE consumed set (a nonce matched by
+  // one target in this call cannot re-authorize another target in the same
+  // call). Deny on the FIRST denied target -- no side effects until the whole
+  // call is known-allowed. Nothing is written on a deny.
+  const consumedLive = new Set(consumedSet)
+  const toConsume = []
   for (const t of targets) {
     let d
     try {
-      d = evaluate({ kind: t.kind, realPath: t.real, grants, now })
+      d = evaluate({ kind: t.kind, realPath: t.real, grants, consumed: consumedLive, now })
     } catch (err) {
       guardLog('GUARD-ERROR', String(err))
       deny('Skill-write guardrail HIBA (evaluate): blokkolva amig javitva nincs.' + GATE_MSG_TAIL)
@@ -347,9 +405,11 @@ if (isInvokedDirectly()) {
       guardLog('DENY', `${agent}\t${t.tool}\t${t.kind}\t${t.real}\t:: ${d.why}`)
       deny(d.why + GATE_MSG_TAIL)
     }
+    if (d.consumeNonce) { consumedLive.add(d.consumeNonce); toConsume.push(d.consumeNonce) }
   }
 
-  // All targets allowed -> audit every skill write, then allow.
+  // Pass 2 (all targets allowed): spend the used nonces, then audit, then allow.
+  appendConsumed(toConsume)
   for (const t of targets) {
     auditLine(agent, t.tool, t.real, t.action, t.hash)
   }

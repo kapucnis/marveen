@@ -28,6 +28,8 @@ import {
   writeAgentChannelProvider,
   readAgentAuthMode,
   writeAgentAuthMode,
+  readAgentClaudePlan,
+  writeAgentClaudePlan,
   readAgentMemoryIsolation,
   writeAgentMemoryIsolation,
   readAgentClaudeConfigDir,
@@ -39,6 +41,7 @@ import {
   KNOWN_VOICE_MODELS,
   type AuthMode,
 } from '../agent-config.js'
+import { readClaudePlans, resolveAgentConfigDir } from '../claude-plans.js'
 import {
   readAgentTeam,
   writeAgentTeam,
@@ -310,6 +313,9 @@ interface AgentSummary {
   runningSince: number | null
   authMode: AuthMode
   securityProfile: string
+  /** Named Claude subscription plan id (see claude-plans.ts), or null when the
+   *  agent uses the raw claudeConfigDir / default resolution. */
+  claudePlan: string | null
   team: TeamConfig
   hasTelegram: boolean
   telegramBotUsername?: string
@@ -376,10 +382,11 @@ function getAgentSummary(name: string): AgentSummary {
     displayName: readAgentDisplayName(name),
     description: extractDescriptionFromClaudeMd(claudeMd),
     model: readAgentModel(name),
-    activeModel: running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    activeModel: running ? readActiveModelFromProjectDir(dir, runningSince ?? undefined, resolveAgentConfigDir(name).configDir ?? undefined) : null,
     runningSince,
     authMode: readAgentAuthMode(name),
     securityProfile: readAgentSecurityProfile(name),
+    claudePlan: readAgentClaudePlan(name),
     team: readAgentTeam(name),
     hasTelegram: tg.hasTelegram,
     telegramBotUsername: tg.botUsername,
@@ -394,7 +401,7 @@ function getAgentSummary(name: string): AgentSummary {
     session,
     hasAvatar: findAvatarForAgent(name) !== null,
     autoRestart: readAutoRestartConfig(name),
-    contextTokens: running ? readContextTokensFromProjectDir(dir, readAgentClaudeConfigDir(name) ?? undefined) : null,
+    contextTokens: running ? readContextTokensFromProjectDir(dir, resolveAgentConfigDir(name).configDir ?? undefined) : null,
     needsReauth: reauth.needsReauth,
     reauthReason: reauth.reason,
   }
@@ -473,6 +480,15 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   if (path === '/api/agents' && method === 'GET') {
     json(res, listAgentSummaries())
+    return true
+  }
+
+  // Named Claude subscription registry (store/claude-plans.json), resolved +
+  // validated. Feeds the per-agent plan dropdown; empty array when no registry
+  // file exists (opt-in feature). Read-only in PR1 -- editing the registry is a
+  // separate surface.
+  if (path === '/api/claude-plans' && method === 'GET') {
+    json(res, readClaudePlans())
     return true
   }
 
@@ -1567,7 +1583,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
     const configRoot = agentConfigRoot(name)
     const data = JSON.parse(body.toString()) as {
       claudeMd?: string; soulMd?: string; mcpJson?: string; model?: string
-      authMode?: AuthMode; apiKey?: string; memoryIsolation?: boolean
+      authMode?: AuthMode; apiKey?: string; claudePlan?: string; memoryIsolation?: boolean
     }
     if (data.memoryIsolation !== undefined) {
       // The main agent's cwd IS the install repo root, which is already a git
@@ -1591,6 +1607,26 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       if (data.authMode !== 'api') {
         deleteSecret(`agent-${name}-api-key`)
       }
+    }
+    // Named Claude plan id. Empty string clears it (-> raw claudeConfigDir /
+    // default). A non-empty id MUST exist in the registry, otherwise the
+    // dashboard would show the agent as plan-assigned while launch silently
+    // falls back to a different login (state/launch drift). Reject unknown ids
+    // rather than persist them.
+    if (data.claudePlan !== undefined) {
+      // The main agent's Claude login comes up via channels.sh (hardcoded
+      // CLAUDE_CONFIG_DIR), not this per-agent path, so a plan set here would be
+      // a silent no-op at launch. Reject loudly rather than mislead the UI.
+      if (name === MAIN_AGENT_ID) {
+        json(res, { error: 'main agent plan is managed via channels.sh, not settable here' }, 400)
+        return true
+      }
+      const planId = data.claudePlan.trim()
+      if (planId && !readClaudePlans().some(p => p.id === planId)) {
+        json(res, { error: `Ismeretlen Claude plan id: ${planId}` }, 400)
+        return true
+      }
+      writeAgentClaudePlan(name, planId)
     }
     json(res, { ok: true })
     return true

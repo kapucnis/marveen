@@ -16,7 +16,8 @@ import {
   paneShowsContextSaturation,
   idleConsideringDimGhost,
 } from '../pane-state.js'
-import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { agentDir, listAgentNames, readAgentModel, readAgentClaudeConfigDir, readAgentClaudePlan, readAgentChannelProvider, readAgentAuthMode, readAgentDisplayName, readAgentRemoteConfig, readAgentRemoteHost, readAgentMemoryIsolation } from './agent-config.js'
+import { resolveAgentConfigDir } from './claude-plans.js'
 import { provisionMemoryBoundaryDir } from './memory-boundary.js'
 import { renameSharedCredentialsIfSafe } from './claude-credentials-guard.js'
 import {
@@ -792,7 +793,23 @@ export function startAgentProcess(name: string, opts: { fresh?: boolean } = {}):
     // the sub-agent would launch logged-out -- so when the token is absent we skip
     // isolation and keep the shared ~/.claude (the pre-isolation, still-stable
     // behaviour) rather than break auth.
-    let claudeConfigDir = readAgentClaudeConfigDir(name)
+    // Named plan wins over the raw per-agent claudeConfigDir; both are opt-in,
+    // so with neither set this is exactly the prior behaviour. The plan's
+    // configDir is already launcher-validated (claude-plans.ts reuses
+    // expandAndValidateConfigDir). NOTE: this covers regular agents only; the
+    // main agent still launches via channels.sh (separate, gated follow-up).
+    const planResolution = resolveAgentConfigDir(name)
+    if (planResolution.planUnresolved) {
+      // The agent has a claudePlan set but it no longer resolves (registry
+      // entry removed/renamed). Do NOT silently boot on the host login --
+      // surface it. The channelsAllowed enforcement guardrail is a separate
+      // gated follow-up; this is just the visibility floor.
+      logger.warn(
+        { name, plan: readAgentClaudePlan(name) },
+        'claude-plan: configured plan id does not resolve in store/claude-plans.json; falling back to raw config-dir / default login',
+      )
+    }
+    let claudeConfigDir = planResolution.configDir
     let oauthTokenEnv = ''
     // Shared-home agents (no isolated config dir) authenticate from the rotating
     // ~/.claude/.credentials.json by default. If the operator has a long-lived

@@ -2820,6 +2820,43 @@ async function openAgentDetail(agentName) {
     }
   }
 
+  // Export button: download a portable .tar.gz bundle of this agent. Offers to
+  // include channel tokens (off by default -- the safe-to-share variant).
+  // The download goes through the auth-wrapped fetch (the global fetch shim
+  // injects the Bearer header) and is turned into a Blob download, rather than
+  // a plain navigation -- a window.location download cannot carry the
+  // Authorization header and the API would 401 it.
+  document.getElementById('exportAgentBtn').onclick = async () => {
+    if (!currentAgent) return
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot token, párosítási állapot)?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const name = currentAgent.name
+    const url = `/api/agents/${encodeURIComponent(name)}/export${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = `marveen-agent-${name}.tar.gz`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Ügynök exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
+    }
+  }
+
   // Reset to first tab, hide avatar gallery
   document.getElementById('detailAvatarGallery').hidden = true
   switchAgentTab('overview')
@@ -3396,6 +3433,88 @@ document.getElementById('analyzeAllModelsBtn').addEventListener('click', async (
     }
   } catch { panel.innerHTML = '<p style="color:var(--error);font-size:13px">' + t('agents.model.error') + '</p>' }
 })
+
+// === Export ALL agents (whole fleet) into one .tar.gz bundle ===
+const exportAllAgentsBtn = document.getElementById('exportAllAgentsBtn')
+if (exportAllAgentsBtn) {
+  exportAllAgentsBtn.addEventListener('click', async () => {
+    const withSecrets = confirm(
+      'Belevegyük a titkokat (channel bot tokenek, párosítási állapot) MINDEN ügynöknél?\n\n' +
+      'OK = igen, csak saját gépek közötti átvitelhez.\n' +
+      'Mégse = nem, biztonságosan megosztható (csak identitás + viselkedés).'
+    )
+    const url = `/api/agents/export-all${withSecrets ? '?secrets=1' : ''}`
+    try {
+      const res = await fetch(url)
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        showToast(data.error || 'Hiba az exportálás során')
+        return
+      }
+      const blob = await res.blob()
+      const objectUrl = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = objectUrl
+      a.download = 'marveen-fleet.tar.gz'
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(objectUrl)
+      showToast(`Flotta exportálva${withSecrets ? ' (titkokkal)' : ''}`)
+    } catch {
+      showToast('Hiba az exportálás során')
+    }
+  })
+}
+
+// === Agent import (upload a .tar.gz bundle exported from another machine) ===
+// Accepts both a single-agent bundle and a whole-fleet bundle -- the backend
+// auto-detects the format from the manifest.
+const importAgentBtn = document.getElementById('importAgentBtn')
+const importAgentFile = document.getElementById('importAgentFile')
+if (importAgentBtn && importAgentFile) {
+  importAgentBtn.addEventListener('click', () => importAgentFile.click())
+  importAgentFile.addEventListener('change', async () => {
+    const file = importAgentFile.files && importAgentFile.files[0]
+    if (!file) return
+    // Reset the input so picking the same file again re-fires change.
+    const upload = async (overwrite) => {
+      const form = new FormData()
+      form.append('file', file)
+      if (overwrite) form.append('overwrite', '1')
+      const res = await fetch('/api/agents/import', { method: 'POST', body: form })
+      const data = await res.json().catch(() => ({}))
+      return { res, data }
+    }
+    try {
+      let { res, data } = await upload(false)
+      if (res.status === 409) {
+        const prompt = data.kind === 'fleet'
+          ? 'Néhány ügynök már létezik ezen a gépen. Felülírjuk az ütközőket?'
+          : `Már létezik "${data.name || ''}" nevű ügynök. Felülírjuk?`
+        if (confirm(prompt)) {
+          ;({ res, data } = await upload(true))
+        } else {
+          return
+        }
+      }
+      if (!res.ok) { showToast(data.error || 'Hiba az importálás során'); return }
+      const note = data.includedSecrets ? ' (titkokkal)' : ''
+      if (data.kind === 'fleet') {
+        const n = (data.imported || []).length
+        const skipped = (data.skipped || []).length
+        showToast(`Flotta importálva: ${n} ügynök${note}${skipped ? ` (${skipped} kihagyva)` : ''}`)
+      } else {
+        showToast(`Ügynök importálva: ${data.name}${note}${data.overwritten ? ' (felülírva)' : ''}`)
+      }
+      loadAgents()
+    } catch {
+      showToast('Hiba az importálás során')
+    } finally {
+      importAgentFile.value = ''
+    }
+  })
+}
 
 document.getElementById('saveAutoRestartBtn').addEventListener('click', async () => {
   if (!currentAgent) return

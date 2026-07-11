@@ -219,6 +219,20 @@ export function evaluate({ kind, realPath, grants, now }) {
 // sibling guards: a bare/relative token is not resolved (the hook subprocess
 // cwd is not reliably the agent's shell cwd) -- the Write/Edit path is the
 // robust check, this is the best-effort second layer.
+//
+// KNOWN RESIDUAL BYPASSES (Yoda adversarial review 2026-07-11 -- deliberately
+// NOT patched by heuristic expansion, which is a losing game like content-
+// sanitization; the REAL guarantee is K3: the agent that processes untrusted
+// external content will have NO Bash tool at all, so none of these routes are
+// reachable from the actual threat surface):
+//   R1: a RELATIVE-path Bash write (e.g. `cd ~/.claude/skills && echo x > f`)
+//       -- the write-intent scan only resolves ABSOLUTE-path tokens, so a
+//       relative redirect after a cd is not seen here.
+//   R2: an INTERPRETER write (e.g. `python3 -c 'open("…/skills/x","w")…'`,
+//       `node -e`, `perl -e`) -- the file write happens inside the interpreter,
+//       not via a shell redirect/cp/tee token, so the regex does not match.
+// Both are Bash-only gaps; the native Write/Edit/NotebookEdit path (the robust
+// check above) is unaffected, and K3 removes Bash from the threat path entirely.
 const WRITE_INTENT_RX = /(>>?(?!&)|\btee\b|\bsed\b[\s\S]*\s-i|\bcp\b|\bmv\b|\binstall\b|\bmkdir\b|\brm\b|\btouch\b|\bln\b)/i
 
 export function bashSkillTargets(command, roots = {}) {

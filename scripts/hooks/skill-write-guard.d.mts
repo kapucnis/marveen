@@ -47,6 +47,7 @@ export type Consumed = Set<string> | string[]
 export function splitSegments(command: string): string[]
 export function stripHeredocBodies(command: string): string
 export function stripDataPayloads(seg: string): string
+export function stripDeviceRedirects(command: string): string
 export function classifyTarget(realPath: string, roots?: Roots): TargetKind | null
 export function globToRegExp(glob: string): RegExp
 export function parseApproval(raw: string): Grant[]

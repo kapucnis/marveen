@@ -33,6 +33,7 @@ export type Consumed = Set<string> | string[]
 export function splitSegments(command: string): string[]
 export function stripHeredocBodies(command: string): string
 export function stripDataPayloads(seg: string): string
+export function stripDeviceRedirects(command: string): string
 export function globToRegExp(glob: string): RegExp
 export function parseApproval(raw: string): Grant[]
 export function parseConsumed(raw: string): Set<string>

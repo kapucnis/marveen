@@ -5,6 +5,7 @@ import {
   splitSegments,
   stripHeredocBodies,
   stripDataPayloads,
+  stripDeviceRedirects,
   globToRegExp,
   parseApproval,
   parseConsumed,
@@ -217,5 +218,86 @@ describe('payload sanitizers', () => {
   it('stripDataPayloads blanks a single-quoted -d body', () => {
     const out = stripDataPayloads(`curl -d '{"x":"rm -rf /"}' http://y`)
     expect(out).not.toContain('rm -rf')
+  })
+})
+
+// --- FP-fix #1: stderr / device-sink redirects are NOT write-intent ----------
+describe('stripDeviceRedirects (FP-fix #1)', () => {
+  it('blanks redirects to /dev/null (fd-prefixed, bare, combined)', () => {
+    expect(stripDeviceRedirects('ls x 2>/dev/null')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('make >/dev/null')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('cmd &>/dev/null')).not.toMatch(/>/)
+  })
+  it('blanks the >/dev/null 2>&1 idiom entirely (incl. the fd-dup)', () => {
+    expect(stripDeviceRedirects('cmd >/dev/null 2>&1')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('cmd 1>/dev/null 2>&1')).not.toMatch(/>/)
+  })
+  it('blanks a bare fd-duplication (2>&1, >&2) -- never a file write', () => {
+    expect(stripDeviceRedirects('cmd 2>&1')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('cmd >&2')).not.toMatch(/>/)
+  })
+  it('LEAVES a redirect to a REAL file intact (no bypass)', () => {
+    expect(stripDeviceRedirects('echo x > /tmp/real')).toContain('> /tmp/real')
+    expect(stripDeviceRedirects('cmd 2>/tmp/errors.log')).toContain('2>/tmp/errors.log')
+    expect(stripDeviceRedirects('cat x > /dev/nullish')).toContain('/dev/nullish')
+  })
+})
+
+describe('bashWriteAttempts: FP-fix #1 (stderr redirect READ chains) ', () => {
+  it('does NOT flag a read chain that suppresses stderr to /dev/null', () => {
+    const cmd = 'ls ~/.claude/scheduled-tasks/ 2>/dev/null && echo --- && cat ~/.claude/x 2>/dev/null | head -150'
+    expect(bashWriteAttempts(cmd)).toHaveLength(0)
+  })
+  it('does NOT flag the ubiquitous >/dev/null 2>&1 idiom', () => {
+    expect(bashWriteAttempts('some-check >/dev/null 2>&1')).toHaveLength(0)
+  })
+  it('STILL flags a real fd-redirect to a real file (no bypass)', () => {
+    // stderr captured to a real file IS a write the default-deny must keep catching
+    expect(bashWriteAttempts("python3 -c 'raise' 2>/tmp/foo/err.log").length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// --- FP-fix #2: a `>` inside an arrow/operator is NOT write-intent -----------
+describe('bashWriteAttempts: FP-fix #2 (arrow / operator tokens)', () => {
+  it('does NOT flag a `->` arrow inside a read-only one-liner', () => {
+    const cmd = `python3 -c "print('-> model:', d.get('model'))"`
+    expect(bashWriteAttempts(cmd)).toHaveLength(0)
+  })
+  it('does NOT flag `=>` or `>=` operators', () => {
+    expect(bashWriteAttempts("node -e 'const f = () => x >= 1'")).toHaveLength(0)
+  })
+  it('STILL flags a real redirect even when an arrow is also present', () => {
+    expect(bashWriteAttempts("echo '-> label' > /tmp/foo/out.txt").length).toBeGreaterThanOrEqual(1)
+  })
+  it('STILL flags `>>` append and `cmd>f` (no-space) real redirects', () => {
+    expect(bashWriteAttempts('echo x >> /tmp/foo/a').length).toBeGreaterThanOrEqual(1)
+    expect(bashWriteAttempts('echo x>/tmp/foo/a').length).toBeGreaterThanOrEqual(1)
+  })
+})
+
+// --- FP-fix #3: Yoda-own scratchpad exception (allow WITHOUT token, audited) -
+describe('decide: FP-fix #3 (Yoda scratchpad exception)', () => {
+  const SP = '/tmp/claude-1000/-home-kapucnis-marveen-agents-yoda/abc-123-sess/scratchpad/ebt-strategia-terv.md'
+  it('ALLOWS a write to Yoda\'s own scratchpad without a token, marked audited', () => {
+    const d = decide({ attempt: { tool: 'Write', real: SP, pathOrCmd: SP, guardOwn: false }, grants: [], consumed: [], now: NOW })
+    expect(d.deny).toBe(false)
+    expect(d.reason).toBe('yoda-scratchpad')
+    expect(d.consumeNonce).toBeUndefined()
+  })
+  it('DENIES another agent\'s scratchpad tree', () => {
+    const other = '/tmp/claude-1000/-home-kapucnis-marveen-agents-nano/s/scratchpad/x.md'
+    expect(decide({ attempt: { tool: 'Write', real: other, pathOrCmd: other, guardOwn: false }, grants: [], consumed: [], now: NOW }).deny).toBe(true)
+  })
+  it('DENIES a random /tmp path (scope is narrow, not /tmp/**)', () => {
+    const rnd = '/tmp/whatever/x.md'
+    expect(decide({ attempt: { tool: 'Write', real: rnd, pathOrCmd: rnd, guardOwn: false }, grants: [], consumed: [], now: NOW }).deny).toBe(true)
+  })
+  it('DENIES the sibling tasks/ dir (only scratchpad is exempt)', () => {
+    const tasks = '/tmp/claude-1000/-home-kapucnis-marveen-agents-yoda/s/tasks/x.md'
+    expect(decide({ attempt: { tool: 'Write', real: tasks, pathOrCmd: tasks, guardOwn: false }, grants: [], consumed: [], now: NOW }).deny).toBe(true)
+  })
+  it('guard-own still beats everything (a scratchpad reason never overrides guard-own)', () => {
+    const d = decide({ attempt: { tool: 'Write', real: SP, pathOrCmd: SP, guardOwn: true }, grants: [], consumed: [], now: NOW })
+    expect(d.deny).toBe(true)
   })
 })

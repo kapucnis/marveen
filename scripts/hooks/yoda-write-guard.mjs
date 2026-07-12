@@ -99,6 +99,19 @@ const GUARD_LOG_PATH = `${MARVEEN_ROOT}/store/self-audit/guard.log`
 // unexpected match if the path shape ever changes).
 const AGENT_OWN_SKILL_RX = /\/agents\/yoda\/\.claude\/skills(?:\/|$)/
 
+// YODA-OWN SCRATCHPAD EXCEPTION (Laci/EliteAI, FP-fix #3, msg 501). The harness
+// gives every session a private throwaway temp tree at
+//   /tmp/claude-<uid>/-home-kapucnis-marveen-agents-yoda/<session-id>/scratchpad/**
+// (verified against Yoda's live path). Writing intermediate work there is a
+// normal, ephemeral part of Yoda's analysis (e.g. drafting ebt-strategia-terv.md)
+// and requires no token -- but it is STILL AUDITED (decision=allow, detail=
+// yoda-scratchpad), exactly like the agent-own-skill exception, so K2 can
+// reconcile it; never silently. Scoped DELIBERATELY NARROW to Yoda's OWN agent
+// slug + a single session-id segment + the scratchpad subdir -- NOT `/tmp/**`,
+// NOT another agent's tree, NOT the sibling `tasks/` dir -- matched on the
+// RESOLVED absolute path (an unresolved/relative Bash target can never match).
+const YODA_SCRATCHPAD_RX = /^\/tmp\/claude-\d+\/-home-kapucnis-marveen-agents-yoda\/[^/]+\/scratchpad(?:\/|$)/
+
 // Basenames of the guard's own files -- matched both by exact resolved path AND
 // (belt-and-suspenders for R1 relative refs) as a substring in write-intent
 // Bash segments.
@@ -158,6 +171,26 @@ export function stripDataPayloads(seg) {
       return flag + (dq ? '""' : "''")
     },
   )
+}
+
+// Blank redirects to a DEVICE SINK (`/dev/null`, `/dev/std{out,err}`, `/dev/tty`,
+// `/dev/fd/N`). `cmd 2>/dev/null`, `>/dev/null`, `&>/dev/null` are the shell's
+// discard/mux idioms that pervade Yoda's read-only analysis one-liners -- the
+// redirect writes nothing to a file the guard should care about. Blanking it
+// BEFORE write-intent scanning stops the `>` from registering as write-intent
+// (and stops `/dev/null` being mistaken for a write target). A redirect to a
+// REAL file (`2>errors.log`, `> f`) is left INTACT -- only the null/device sinks
+// are exempted, so no real-file write detection is weakened (opens NO bypass:
+// `2>/home/.../CLAUDE.md` and `> f` stay caught). (FP-fix #1, EliteAI msg 501.)
+export function stripDeviceRedirects(command) {
+  return String(command ?? '')
+    // redirect to a device sink: `2>/dev/null`, `>/dev/null`, `&>/dev/null`, ...
+    .replace(/(?:^|\s)(?:&|\d)*>>?\s*\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)\b/gi, ' ')
+    // fd-duplication -- NEVER a file write: `2>&1`, `>&2`, `1>&2`, `2>&-`. Must be
+    // blanked here too: splitSegments() cuts on `&`, so `2>&1` would otherwise
+    // orphan a bare `2>` fragment that re-matches write-intent (the ubiquitous
+    // `>/dev/null 2>&1` read idiom). A dup redirects a descriptor, not a path.
+    .replace(/(?:^|\s)\d*>&[\d-]+/g, ' ')
 }
 
 // --- approval token (grant semantics identical to K1, pathGlob now OPTIONAL) -
@@ -231,8 +264,19 @@ function isYodaOwnSkill(realPath) {
   return realPath != null && AGENT_OWN_SKILL_RX.test(realPath)
 }
 
+function isYodaScratchpad(realPath) {
+  return realPath != null && YODA_SCRATCHPAD_RX.test(realPath)
+}
+
 // --- Bash write-intent target extraction ------------------------------------
-const WRITE_INTENT_RX = /(>>?(?!&)|\btee\b|\bsed\b[\s\S]*\s-i|\bcp\b|\bmv\b|\binstall\b|\bmkdir\b|\brm\b|\btouch\b|\bln\b)/i
+// Redirect token: a real output redirect `>`/`>>`, EXCLUDING operator/arrow
+// forms that merely contain a `>` inside code/prose -- `->` (Python/JS arrow),
+// `=>` (fat arrow), `>=` (comparison), `2>&1` (fd-dup). Lookbehind `(?<![-=])`
+// drops `->`/`=>`; lookahead `(?![=&])` drops `>=` and the fd-dup `2>&1`. A bare
+// `>`/`>>` to a real file (`> f`, `cmd>f`, `2>f`) still matches -> no bypass.
+// (FP-fix #2, EliteAI msg 501 + Yoda repro: a `'-> model:'` label in a read-only
+// python one-liner was falsely classified as a write.)
+const WRITE_INTENT_RX = /((?<![-=])>>?(?![=&])|\btee\b|\bsed\b[\s\S]*\s-i|\bcp\b|\bmv\b|\binstall\b|\bmkdir\b|\brm\b|\btouch\b|\bln\b)/i
 
 function guardOwnMentioned(seg) {
   const s = String(seg ?? '')
@@ -245,7 +289,7 @@ function guardOwnMentioned(seg) {
 // list means "no write intent" -> the command is not a write (curl POST, grep,
 // cat, git, etc.) and will be allowed.
 export function bashWriteAttempts(command) {
-  const cmd = stripDataPayloads(stripHeredocBodies(String(command ?? '')))
+  const cmd = stripDeviceRedirects(stripDataPayloads(stripHeredocBodies(String(command ?? ''))))
   const attempts = []
   for (const seg of splitSegments(cmd)) {
     if (!WRITE_INTENT_RX.test(seg)) continue
@@ -289,6 +333,8 @@ export function decide({ attempt, grants, consumed, now }) {
   if (attempt.guardOwn) {
     return { deny: true, why: `a yoda-write-guard sajat token/audit/ledger fajlja (${attempt.pathOrCmd}) tool-hivasbol NEM irhato -- EliteAI kezeli out-of-band, meg ervenyes tokennel sem` }
   }
+  // Yoda-own scratchpad exception (FP-fix #3): allowed WITHOUT a token, audited.
+  if (isYodaScratchpad(attempt.real)) return { deny: false, reason: 'yoda-scratchpad' }
   // Agent-own skills exception (Laci option 2): allowed WITHOUT a token, audited.
   if (isYodaOwnSkill(attempt.real)) return { deny: false, reason: 'agent-own-skill' }
   const g = matchingGrant(grants, attempt.real, now, consumed)

@@ -11,6 +11,7 @@ import {
   bashSkillTargets,
   stripHeredocBodies,
   stripDataPayloads,
+  stripDeviceRedirects,
 } from '../../scripts/hooks/skill-write-guard.mjs'
 
 const ROOTS = { home: '/h', root: '/r' }
@@ -171,5 +172,35 @@ describe('payload sanitizers', () => {
   it('stripDataPayloads blanks a single-quoted -d body', () => {
     const out = stripDataPayloads(`curl -d '{"x":"rm -rf /"}' http://y`)
     expect(out).not.toContain('rm -rf')
+  })
+})
+
+// --- FP-fix #1/#2: device redirects + arrow tokens are not write-intent ------
+describe('stripDeviceRedirects (FP-fix #1)', () => {
+  it('blanks /dev/null redirects and fd-dups, keeps real-file redirects', () => {
+    expect(stripDeviceRedirects('cat x 2>/dev/null')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('cmd >/dev/null 2>&1')).not.toMatch(/>/)
+    expect(stripDeviceRedirects('echo x > /r/real')).toContain('> /r/real')
+  })
+})
+
+describe('bashSkillTargets: FP-fix #1/#2 (read-only commands)', () => {
+  it('does NOT flag a scheduled-task READ that suppresses stderr (2>/dev/null)', () => {
+    // pure read of a task-config with stderr-suppression must not look like a write
+    expect(bashSkillTargets('cat /h/.claude/scheduled-tasks/x/task-config.json 2>/dev/null', ROOTS)).toHaveLength(0)
+  })
+  it('does NOT flag a skill READ with the >/dev/null 2>&1 idiom', () => {
+    expect(bashSkillTargets('grep foo /h/.claude/skills/x/SKILL.md >/dev/null 2>&1', ROOTS)).toHaveLength(0)
+  })
+  it('does NOT flag a `->` arrow token next to an (unquoted) skill path', () => {
+    expect(bashSkillTargets("echo '-> label' /h/.claude/skills/x/SKILL.md", ROOTS)).toHaveLength(0)
+  })
+  it('STILL flags a REAL redirect write to a skill path (no bypass)', () => {
+    expect(bashSkillTargets('echo x > /h/.claude/skills/evil/SKILL.md', ROOTS)[0].kind).toBe('global-skill')
+  })
+  it('STILL flags a real fd-redirect (2> file) capturing into a skill path', () => {
+    // fd-redirect to a REAL skill file (not a device sink) stays caught when the
+    // target is extractable (whitespace-separated). Only /dev/* sinks are exempt.
+    expect(bashSkillTargets('python3 -c pass 2> /h/.claude/skills/evil/SKILL.md', ROOTS)[0].kind).toBe('global-skill')
   })
 })

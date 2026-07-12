@@ -9,6 +9,7 @@ export type TargetKind =
   | 'guard-token'
   | 'guard-log'
   | 'guard-consumed'
+  | 'uncertain'
 
 export interface Roots {
   home?: string

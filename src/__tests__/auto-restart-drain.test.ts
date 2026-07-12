@@ -8,6 +8,7 @@ import {
 } from '../auto-restart-drain.js'
 import type { AutoRestartConfig } from '../auto-restart.js'
 import type { AgentTaskState } from '../web/agent-taskstate.js'
+import { PROJECT_ROOT } from '../config.js'
 
 const cfg = (over: Partial<AutoRestartConfig> = {}): AutoRestartConfig => ({
   enabled: true, mode: 'fresh', dailyTime: null, intervalHours: null, handoff: true, ...over,
@@ -67,8 +68,15 @@ describe('drainAccepted (A2 freshness)', () => {
 })
 
 describe('DRAIN_PROMPT (A5 static, U1 network-only)', () => {
-  it('is fully static -- no interpolation markers', () => {
-    expect(DRAIN_PROMPT).not.toContain('${')
+  it('F-1: uses the ABSOLUTE PROJECT_ROOT token path (works from ANY agent cwd)', () => {
+    // The token MUST be read via an absolute path -- a bare relative
+    // `store/.dashboard-token` reads empty from a sub-agent cwd -> 401 -> the
+    // drain would always time out on the dominant path (Yoda F-1).
+    expect(DRAIN_PROMPT).toContain(`$(cat ${PROJECT_ROOT}/store/.dashboard-token)`)
+    expect(DRAIN_PROMPT).not.toContain('$(cat store/.dashboard-token)') // no bare relative form
+  })
+  it('is otherwise static -- PROJECT_ROOT already resolved, only SAJAT_NEVED left for the agent', () => {
+    expect(DRAIN_PROMPT).not.toContain('${') // the one allowed interpolation is resolved at module load
     expect(DRAIN_PROMPT).toContain('SAJAT_NEVED') // static placeholder the agent substitutes
   })
   it('persists via the network POST endpoint, not a file tool', () => {

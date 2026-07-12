@@ -20,6 +20,7 @@
 //       yoda-write-guard) still succeeds (the guards ignore network calls).
 
 import { logger } from './logger.js'
+import { PROJECT_ROOT } from './config.js'
 import type { AutoRestartConfig } from './auto-restart.js'
 import type { AgentTaskState } from './web/agent-taskstate.js'
 
@@ -29,13 +30,21 @@ import type { AgentTaskState } from './web/agent-taskstate.js'
 export const DRAIN_TIMEOUT_MS = 75_000
 export const DRAIN_POLL_MS = 2_000
 
-// A5 (HARD): completely static text. The agent substitutes its OWN name (it
-// knows it), exactly as the PreCompact capture prompt does. U1: network POST
+// A5 (HARD): the drain prompt is STATIC -- NO external or per-restart dynamic
+// data, which would be an injection surface. The ONE allowed interpolation is
+// the server's OWN build constant PROJECT_ROOT, resolved ONCE at module load
+// (the same trusted source the settings.json template uses for {{PROJECT_ROOT}}).
+// This is REQUIRED, not cosmetic: it makes the token path ABSOLUTE so the curl
+// works from ANY agent cwd. A bare relative `store/.dashboard-token` would read
+// an EMPTY token from a sub-agent's own working dir (no `store` symlink there)
+// -> 401 -> the record is never written -> the drain would ALWAYS time out on
+// the dominant path (F-1, Yoda review). The agent still substitutes its OWN name
+// (SAJAT_NEVED), exactly as the PreCompact capture prompt does. U1: network POST
 // only, never a file tool.
 export const DRAIN_PROMPT = [
   '[RENDSZER -- pre-restart taskstate-mentes]',
   'A sessionod mindjart FRISS ujrainditasra kerul es a kontextusod el fog veszni. HA egy feladat KOZBEN vagy, mentsd el a task-allapotodat MOST -- KIZAROLAG halozati POST-tal, SOHA fajl-irassal:',
-  'curl -s -X POST http://localhost:3420/api/agent-taskstate/SAJAT_NEVED -H "Content-Type: application/json" -H "Authorization: Bearer $(cat store/.dashboard-token)" -d \'{"summary":"egysoros mit-csinalok","doneSteps":["mar kesz lepesek"],"alreadyDelegated":["mar atadva masnak"],"nextAction":"innen folytasd","pendingDecision":"nyitott dontes/blokkolo"}\'',
+  `curl -s -X POST http://localhost:3420/api/agent-taskstate/SAJAT_NEVED -H "Content-Type: application/json" -H "Authorization: Bearer $(cat ${PROJECT_ROOT}/store/.dashboard-token)" -d '{"summary":"egysoros mit-csinalok","doneSteps":["mar kesz lepesek"],"alreadyDelegated":["mar atadva masnak"],"nextAction":"innen folytasd","pendingDecision":"nyitott dontes/blokkolo"}'`,
   'Csereld a SAJAT_NEVED-et a sajat agent-nevedre. HA NINCS folyamatban feladatod (idle vagy), NE csinalj semmit es NE irj ures rekordot. Csak ezt az egy POST-ot futtasd le, ha kell -- ne valaszolj mast.',
 ].join('\n')
 

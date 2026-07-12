@@ -204,3 +204,22 @@ describe('bashSkillTargets: FP-fix #1/#2 (read-only commands)', () => {
     expect(bashSkillTargets('python3 -c pass 2> /h/.claude/skills/evil/SKILL.md', ROOTS)[0].kind).toBe('global-skill')
   })
 })
+
+// --- no-space redirect gap (kanban 48957aec): the fail-open skill-write bypass -
+describe('bashSkillTargets: no-space redirect gap CLOSED', () => {
+  it('flags a NO-SPACE redirect into a global skill (was a fail-open BYPASS)', () => {
+    const h = bashSkillTargets('echo payload>/h/.claude/skills/evil/SKILL.md', ROOTS)
+    expect(h).toHaveLength(1)
+    expect(h[0]).toMatchObject({ kind: 'global-skill', action: 'modify' })
+  })
+  it('flags a NO-SPACE append (>>) into a scheduled-task path', () => {
+    const h = bashSkillTargets('echo x>>/h/.claude/scheduled-tasks/bar/task-config.json', ROOTS)
+    expect(h[0]?.kind).toBe('scheduled-task')
+  })
+  it('still does NOT flag a device-suppressed read glued to the redirect', () => {
+    expect(bashSkillTargets('cat /h/.claude/skills/x/SKILL.md 2>/dev/null', ROOTS)).toHaveLength(0)
+  })
+  it('still does NOT flag an arrow token near a skill path', () => {
+    expect(bashSkillTargets("echo '-> /h/.claude/skills/x/SKILL.md'", ROOTS)).toHaveLength(0)
+  })
+})

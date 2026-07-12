@@ -210,6 +210,19 @@ export function chooseReplayInjection(
     const text = buildHotFallbackInjection(hotMemories, nowMs)
     return { kind: text ? 'hot-fallback' : 'none', text }
   }
+  // compact with no valid record: keep Claude's own compact summary, no hot net.
+  if (source === 'compact') return { kind: 'none', text: null }
+  // 'clear' is a KNOWN source but an INTENTIONAL non-replay: /clear is an
+  // explicit context wipe, so re-injecting the task-state would override the
+  // user's intent. Log at INFO so the deliberate no-op is visible (GPT-crosscheck a).
+  if (source === 'clear') {
+    logger.info({ source }, 'taskstate replay: /clear is an explicit context wipe -- deliberately NOT replaying (re-injecting the task-state would override the intent)')
+    return { kind: 'none', text: null }
+  }
+  // FAIL-SAFE: an unrecognised source (e.g. a future Claude Code SessionStart
+  // value) must not slip through silently -- WARN so we notice and can extend
+  // the handled set rather than mis-handle a new source.
+  logger.warn({ source }, 'taskstate replay: unknown SessionStart source -- not replaying (fail-safe)')
   return { kind: 'none', text: null }
 }
 

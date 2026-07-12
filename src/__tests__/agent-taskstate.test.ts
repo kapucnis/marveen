@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
+import { logger } from '../logger.js'
 import {
   shouldReplayTaskState,
   isEmptyTaskState,
@@ -213,6 +214,27 @@ describe('chooseReplayInjection (F2 orchestration)', () => {
   it('no task-state + only STALE hot -> none (T-TS5)', () => {
     const stale: HotMemoryRow[] = [{ content: 'old', ts: NOW - 25 * 60 * 60 * 1000 }]
     expect(chooseReplayInjection(null, 'startup', NOW, stale).kind).toBe('none')
+  })
+})
+
+// GPT-crosscheck (a): source fail-safe -- /clear is a deliberate no-op (logged
+// INFO), any UNKNOWN source is a fail-safe no-op (logged WARN).
+describe('chooseReplayInjection source handling (GPT-crosscheck a)', () => {
+  it('clear: NO injection even with a valid record, + INFO log (explicit context wipe)', () => {
+    const spy = vi.spyOn(logger, 'info').mockImplementation(((): void => {}) as never)
+    const d = chooseReplayInjection(rec(), 'clear', NOW + 1000, [])
+    expect(d.kind).toBe('none')
+    expect(d.text).toBeNull()
+    expect(spy).toHaveBeenCalled()
+    spy.mockRestore()
+  })
+  it('unknown source: NO injection + WARN log (fail-safe for a future Claude Code source)', () => {
+    const spy = vi.spyOn(logger, 'warn').mockImplementation(((): void => {}) as never)
+    const d = chooseReplayInjection(rec(), 'teleport-v2', NOW + 1000, [])
+    expect(d.kind).toBe('none')
+    expect(d.text).toBeNull()
+    expect(spy).toHaveBeenCalled()
+    spy.mockRestore()
   })
 })
 

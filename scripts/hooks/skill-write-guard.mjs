@@ -67,6 +67,7 @@ import { fileURLToPath } from 'node:url'
 import { resolve, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
+import { extractAbsoluteTargets } from './lib/write-targets.mjs'
 
 const MARVEEN_ROOT = process.env.SKILL_GUARD_ROOT || '/home/kapucnis/marveen'
 const HOME = process.env.SKILL_GUARD_HOME || homedir()
@@ -298,7 +299,9 @@ export function bashSkillTargets(command, roots = {}) {
   for (const seg of splitSegments(cmd)) {
     if (!WRITE_INTENT_RX.test(seg)) continue
     const isDelete = /\brm\b/.test(seg)
-    const tokens = seg.match(/(?:^|\s)(\/[^\s'"]+)/g) || []
+    // Shared extractor: also catches no-space redirect targets (`x>/skill/path`)
+    // the old `(?:^|\s)(\/...)` missed -- a fail-open skill-write-ban bypass.
+    const tokens = extractAbsoluteTargets(seg)
     for (const t of tokens) {
       const real = resolveReal(t.trim())
       const kind = classifyTarget(real, roots)

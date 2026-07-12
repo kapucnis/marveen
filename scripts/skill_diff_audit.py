@@ -127,7 +127,9 @@ def escalate(unexplained):
         return
     try:
         token = open(TOKEN_FILE).read().strip()
-        body = json.dumps({"from": "nano", "to": "eliteai", "content": summary}).encode()
+        # Self-directed: the audit runs as EliteAI's own scheduled task (agent:eliteai
+        # in the task-config), so it escalates into EliteAI's session, not nano's.
+        body = json.dumps({"from": "eliteai", "to": "eliteai", "content": summary}).encode()
         req = urllib.request.Request(DASH + "/api/messages", data=body,
                                      headers={"Content-Type": "application/json",
                                               "Authorization": "Bearer " + token})

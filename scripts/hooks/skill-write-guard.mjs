@@ -144,6 +144,20 @@ export function stripDataPayloads(seg) {
   )
 }
 
+// Blank redirects to a DEVICE SINK (`/dev/null`, `/dev/std{out,err}`, `/dev/tty`,
+// `/dev/fd/N`) BEFORE write-intent scanning. `cat …/scheduled-tasks/x.json
+// 2>/dev/null` is a pure READ -- the `2>/dev/null` must not make the guard treat
+// the scheduled-task path as a WRITE target. A redirect to a REAL file is left
+// intact, so no real-file write detection is weakened (no bypass). (FP-fix #1.)
+export function stripDeviceRedirects(command) {
+  return String(command ?? '')
+    // redirect to a device sink: `2>/dev/null`, `>/dev/null`, `&>/dev/null`, ...
+    .replace(/(?:^|\s)(?:&|\d)*>>?\s*\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)\b/gi, ' ')
+    // fd-duplication -- NEVER a file write: `2>&1`, `>&2` (splitSegments cuts on
+    // `&`, so `2>&1` would orphan a bare `2>` fragment; `>/dev/null 2>&1` idiom).
+    .replace(/(?:^|\s)\d*>&[\d-]+/g, ' ')
+}
+
 // --- path classification ----------------------------------------------------
 // Returns the kind of protected target a resolved absolute path represents.
 export function classifyTarget(realPath, roots = {}) {
@@ -272,10 +286,14 @@ export function evaluate({ kind, realPath, grants, consumed, now }) {
 //       not via a shell redirect/cp/tee token, so the regex does not match.
 // Both are Bash-only gaps; the native Write/Edit/NotebookEdit path (the robust
 // check above) is unaffected, and K3 removes Bash from the threat path entirely.
-const WRITE_INTENT_RX = /(>>?(?!&)|\btee\b|\bsed\b[\s\S]*\s-i|\bcp\b|\bmv\b|\binstall\b|\bmkdir\b|\brm\b|\btouch\b|\bln\b)/i
+// Redirect token excludes operator/arrow forms that merely contain a `>` in
+// code/prose (`->`, `=>`, `>=`, `2>&1`) via lookbehind `(?<![-=])` + lookahead
+// `(?![=&])`; a bare `>`/`>>` to a real file still matches -> no bypass. (FP-fix
+// #2: a `'-> …'` label in a read-only one-liner was misread as write-intent.)
+const WRITE_INTENT_RX = /((?<![-=])>>?(?![=&])|\btee\b|\bsed\b[\s\S]*\s-i|\bcp\b|\bmv\b|\binstall\b|\bmkdir\b|\brm\b|\btouch\b|\bln\b)/i
 
 export function bashSkillTargets(command, roots = {}) {
-  const cmd = stripDataPayloads(stripHeredocBodies(String(command ?? '')))
+  const cmd = stripDeviceRedirects(stripDataPayloads(stripHeredocBodies(String(command ?? ''))))
   const hits = []
   for (const seg of splitSegments(cmd)) {
     if (!WRITE_INTENT_RX.test(seg)) continue

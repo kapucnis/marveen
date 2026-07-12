@@ -247,6 +247,27 @@ export function approvalCovers(grants, realPath, now, consumed = []) {
   return matchingGrant(grants, realPath, now, consumed) != null
 }
 
+// Is there ANY still-usable approval grant (nonce, unexpired, unconsumed)? Used
+// only to gate the LAYER-2 raw-substring backstop so a legitimately-approved
+// global-skill Bash write is not blocked by it.
+export function hasAnyValidGrant(grants, consumed, now) {
+  const used = consumed instanceof Set ? consumed : new Set(consumed || [])
+  for (const g of grants || []) {
+    const nonce = typeof g.nonce === 'string' ? g.nonce.trim() : ''
+    if (nonce && !used.has(nonce) && grantExpiry(g) > now) return true
+  }
+  return false
+}
+
+// LAYER 2 protected roots (kanban c54aa473 pivot): the APPROVAL-REQUIRED skill
+// roots -- GLOBAL skills + scheduled-tasks, which live directly under the user's
+// home (NOT the agent-own `…/agents/<name>/.claude/skills/`, which is allowed).
+// A write-intent Bash command whose RAW text literally contains one of these,
+// with no valid approval grant, is a (possibly tokenizer-hidden) protected write.
+export const SKILL_PROTECTED_RAW_RX = new RegExp(
+  HOME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\/\\.claude\\/(?:skills|scheduled-tasks)\\/',
+)
+
 // --- pure decision ----------------------------------------------------------
 // kind: classifyTarget result; grants: parseApproval result; now: epoch ms.
 // Returns { deny, why?, audit? } where audit=true means "allowed skill write,
@@ -403,9 +424,21 @@ if (isInvokedDirectly()) {
   let targets, grants, consumedSet
   try {
     targets = collectTargets(payload)
-    if (targets.length === 0) allow()
     grants = parseApproval(existsSync(APPROVAL_PATH) ? readFileSync(APPROVAL_PATH, 'utf-8') : '')
     consumedSet = parseConsumed(existsSync(CONSUMED_PATH) ? readFileSync(CONSUMED_PATH, 'utf-8') : '')
+    // LAYER 2 (raw-substring backstop, tokenization-INDEPENDENT, c54aa473 pivot):
+    // a Bash write-intent command whose TRULY RAW text literally contains a
+    // global/scheduled skill root, with NO valid approval grant, is a protected
+    // skill write even if the tokenizer failed to surface the target. Runs before
+    // the empty-targets early-allow so a parser miss cannot slip past.
+    if (String(payload?.tool_name) === 'Bash') {
+      const raw = String(payload?.tool_input?.command ?? '')
+      if (WRITE_INTENT_RX.test(raw) && SKILL_PROTECTED_RAW_RX.test(raw) && !hasAnyValidGrant(grants, consumedSet, Date.now())) {
+        guardLog('DENY', `layer2-raw-substring :: ${raw.slice(0, 160)}`)
+        deny('vedett GLOBALIS/utemezett skill-gyoker a NYERS parancs-stringben, ervenyes approval nelkul (layer-2 substring backstop) -- fail-closed.' + GATE_MSG_TAIL)
+      }
+    }
+    if (targets.length === 0) allow()
   } catch (err) {
     guardLog('GUARD-ERROR', String(err))
     deny('Skill-write guardrail HIBA: a logika hibara futott, ezert ez a muvelet blokkolva van amig ez nincs javitva. Szolj EliteAI-nak.' + GATE_MSG_TAIL)

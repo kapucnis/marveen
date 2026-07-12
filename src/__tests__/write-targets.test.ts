@@ -67,4 +67,41 @@ describe('extractAbsoluteTargets', () => {
     // @ts-expect-error runtime nullish guard
     expect(extractAbsoluteTargets(undefined).targets).toEqual([])
   })
+
+  // quote-CONCATENATION bypass (c54aa473 follow-up, EliteAI adversarial pass):
+  // bash fuses adjacent quoted+unquoted spans into one word -- a masking approach
+  // lost the quoted prefix; the word-reconstruction tokenizer collapses them.
+  // T6 (architecture pivot c54aa473): opt-in fail-closed on uncertainty.
+  it('LAYER 1: writeIntent opt-in + real write redirect + no absolute target -> uncertain', () => {
+    expect(extractAbsoluteTargets('echo x > out.txt', { writeIntent: true }).uncertain).toBe(true)
+    expect(extractAbsoluteTargets('echo x >$HOME/out', { writeIntent: true }).uncertain).toBe(true)
+  })
+  it('LAYER 1 does NOT fire without the opt-in (skill-write path keeps relative writes)', () => {
+    expect(extractAbsoluteTargets('echo x > out.txt').uncertain).toBe(false)
+  })
+  it('LAYER 1 is quote-aware: a quoted `>` in a read is NOT a write redirect', () => {
+    expect(extractAbsoluteTargets('grep ">" somefile', { writeIntent: true }).uncertain).toBe(false)
+  })
+  it('LAYER 1 ignores a device-only write (cat a>/dev/null stays allowed)', () => {
+    const r = extractAbsoluteTargets('cat a>/dev/null', { writeIntent: true })
+    expect(r.targets).toEqual([])
+    expect(r.uncertain).toBe(false)
+  })
+  it('LAYER 1 still allows a resolvable absolute write (no false uncertain)', () => {
+    const r = extractAbsoluteTargets('echo x > /tmp/ok', { writeIntent: true })
+    expect(r.targets).toEqual(['/tmp/ok'])
+    expect(r.uncertain).toBe(false)
+  })
+
+  it('reconstructs a path split across quoted+unquoted concatenation', () => {
+    const P = '/home/x/evil.ts'
+    expect(extractAbsoluteTargets('cat a>"/home/x/"evil.ts').targets).toEqual([P])   // quoted prefix
+    expect(extractAbsoluteTargets('cat a>/home/x/"evil.ts"').targets).toEqual([P])   // quoted suffix
+    expect(extractAbsoluteTargets('cat a>"/home/x/evil.ts"').targets).toEqual([P])   // fully quoted
+    expect(extractAbsoluteTargets("cat a>'/home/x/'evil.ts").targets).toEqual([P])   // single-quote prefix
+    expect(extractAbsoluteTargets('cat a>/home/"x"/evil.ts').targets).toEqual([P])   // quoted middle
+    expect(extractAbsoluteTargets('cat a>""/home/x/evil.ts').targets).toEqual([P])   // empty-quote prefix
+    expect(extractAbsoluteTargets('cat a>"/"home/x/evil.ts').targets).toEqual([P])   // only slash quoted
+    expect(extractAbsoluteTargets('cat a>\\/home/x/evil.ts').targets).toEqual([P])   // backslash-escaped slash
+  })
 })

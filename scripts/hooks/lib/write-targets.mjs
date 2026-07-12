@@ -18,17 +18,18 @@
 // Patching the character class again would just leave a 4th variant open
 // (`>>`, `2>`, `<>`, `>|`, quotes around the redirect, multiple redirects).
 //
-// APPROACH (3 structural steps):
-//   1. maskQuotes(): quote/escape-aware pass that blanks quoted spans. This is
-//      what makes a quoted `>` (e.g. python `print('-> x')`, `grep ">" f`) NOT a
-//      redirect and a quoted path not a target -- and it subsumes the old
-//      arrow/operator exclusion for free (the morning `->` FP was a QUOTED arrow).
-//   2. split on the redirect-operator family (any run of `<`/`>` incl. `>>`,
-//      `2>`, `&>`, `<>`, `>|`, `>&`): the operator is an EXPLICIT boundary, so a
-//      command-arg/read-source on the LEFT and a redirect target on the RIGHT can
-//      never fuse into one token.
-//   3. extract absolute-path targets from EACH resulting piece; skip /dev/*
-//      device sinks.
+// APPROACH: a real char-by-char shell-word tokenizer (tokenizeWords) that
+//   - reconstructs each word's UNQUOTED VALUE, so adjacent quoted+unquoted spans
+//     that bash CONCATENATES into one word collapse correctly (`>"/a/"b` -> `/a/b`).
+//     A first attempt that MASKED (blanked) quoted spans lost the leading `/a/`
+//     and let `>"/main/src/"evil.ts` slip through (c54aa473 follow-up, found by
+//     EliteAI's adversarial pass) -- reconstruction, not masking, is required.
+//   - treats a quoted `>` (python `print('-> x')`, `grep ">" f`) as ordinary word
+//     content, NOT a redirect -- this subsumes the old arrow/operator exclusion.
+//   - splits at unquoted redirect operators (`>`/`<` runs incl. `>>`,`2>`,`<>`,
+//     `>|`,`n>&m`), which are EXPLICIT boundaries, so a left arg/read-source and a
+//     right redirect target can never fuse into one token.
+// Then a word is a target iff its value is an absolute path (skip /dev/* sinks).
 //
 // FAIL-CLOSED ON UNCERTAINTY (Yoda requirement): returns { targets, uncertain }.
 // uncertain === true when the segment cannot be cleanly tokenized -- unbalanced
@@ -44,65 +45,103 @@
 
 const DEVICE_PATH_RX = /^\/dev\/(?:null|stdout|stderr|tty|fd\/\d+)$/
 
-// Blank quoted spans (single, double, ANSI-C-ish) and unquoted backslash-escapes,
-// length-preserving. A char inside quotes becomes a space so it can be neither a
-// redirect operator nor part of a path. Unbalanced quote -> uncertain.
-function maskQuotes(s) {
-  let out = ''
+// Tokenize a command segment into shell-ish WORDS, reconstructing each word's
+// UNQUOTED VALUE, and splitting at unquoted whitespace and unquoted redirect
+// operators. This is a real char-by-char tokenizer -- NOT a mask/regex -- because
+// bash CONCATENATES adjacent quoted and unquoted spans into ONE word:
+//   >"/home/x/"evil.ts   is the single word  /home/x/evil.ts
+// A masking approach blanked the quoted `/home/x/` and left `evil.ts` looking
+// non-absolute -> bypass (c54aa473 follow-up, found by EliteAI adversarial pass).
+// Reconstructing the value (drop only the quote DELIMITERS, keep their content)
+// makes concatenation, leading-quote, and mixed-quote forms all collapse to the
+// real word. Redirect operators (`>`/`<` runs, incl. `>>`,`2>`,`<>`,`>|`,`n>&m`)
+// are explicit boundaries so a left arg and a right target never fuse.
+// uncertain: unbalanced quote, trailing unquoted `\`, or a WRITE redirect with no
+// following word operand (target invisible) -> caller fails closed.
+function tokenizeWords(seg) {
+  const s = String(seg ?? '')
+  const words = []
+  let cur = ''
+  let started = false            // an empty-quoted "" still counts as a word
   let quote = null
   let uncertain = false
+  let pendingWrite = false       // last op was a write redirect (> / >>)
+  let gotOperand = true          // has the pending write redirect gotten a word yet
+  let sawWrite = false           // any write redirect seen in this segment
+  const endWord = () => {
+    if (started) { words.push(cur); if (pendingWrite) gotOperand = true }
+    cur = ''; started = false
+  }
   for (let i = 0; i < s.length; i++) {
     const c = s[i]
     if (quote) {
-      if (quote === '"' && c === '\\' && i + 1 < s.length) { out += '  '; i++; continue }
-      if (c === quote) { quote = null; out += ' '; continue }
-      out += ' '
+      if (quote === '"' && c === '\\' && i + 1 < s.length) { cur += s[++i]; started = true; continue }
+      if (c === quote) { quote = null; started = true; continue } // delimiter dropped, content kept
+      cur += c; started = true
       continue
     }
-    if (c === "'" || c === '"') { quote = c; out += ' '; continue }
+    if (c === "'" || c === '"') { quote = c; started = true; continue }
     if (c === '\\') {
-      if (i + 1 < s.length) { out += '  '; i++ } else { out += ' '; uncertain = true }
+      if (i + 1 < s.length) { cur += s[++i]; started = true } else uncertain = true
       continue
     }
-    out += c
+    if (c === '>' || c === '<') {
+      endWord()
+      let op = c, j = i + 1
+      while (j < s.length && (s[j] === '>' || s[j] === '<')) op += s[j++]
+      if (s[j] === '&') { op += s[j++]; while (j < s.length && /[\d-]/.test(s[j])) op += s[j++] } // n>&m dup
+      else if (s[j] === '|') op += s[j++]                                                          // >| clobber
+      i = j - 1
+      const isWrite = op.includes('>') && !op.includes('&')
+      if (isWrite) {
+        if (pendingWrite && !gotOperand) uncertain = true
+        pendingWrite = true; gotOperand = false; sawWrite = true
+      }
+      continue
+    }
+    if (/\s/.test(c)) { endWord(); continue }
+    cur += c; started = true
   }
+  endWord()
   if (quote) uncertain = true
-  return { masked: out, uncertain }
+  if (pendingWrite && !gotOperand) uncertain = true
+  return { words, uncertain, hadWriteRedirect: sawWrite }
 }
 
-// A run of redirect-operator characters: `<`/`>` (covers >, >>, <, <<, <>, >&,
-// <&) optionally followed by a single `|` (>| clobber). Digits/`&` that PREFIX
-// an fd redirect (`2>`, `&>`) are left on the previous piece harmlessly -- they
-// are not paths, and the real target after the operator is a separate piece.
-const OP_RX = /[<>]+\|?/g
-
-export function extractAbsoluteTargets(seg) {
-  const { masked, uncertain: quoteUncertain } = maskQuotes(String(seg ?? ''))
-  let uncertain = quoteUncertain
-
-  const ops = masked.match(OP_RX) || []
-  const pieces = masked.split(OP_RX)
-
-  // A WRITE redirect (`>`/`>>`, incl. fd/`&`-prefixed -- any op containing `>`
-  // except a pure fd-dup `>&`) must have a non-empty operand piece after it; if
-  // not, the write target is invisible -> uncertain (fail-closed).
-  for (let k = 0; k < ops.length; k++) {
-    const op = ops[k]
-    const isWrite = op.includes('>') && op !== '>&'
-    if (isWrite) {
-      const after = (pieces[k + 1] || '').trim()
-      if (after === '') uncertain = true
-    }
-  }
-
+// LAYER 1 -- FAIL-CLOSED ON UNCERTAINTY (architecture pivot, kanban c54aa473).
+// The security decision must NOT depend on the tokenizer being complete. If the
+// segment carries write-intent (the caller's WRITE_INTENT_RX gate, passed as
+// opts.writeIntent, or a write redirect the tokenizer itself saw) but NO absolute
+// target could be proven, that is treated as UNCERTAIN -> the caller denies.
+// This INVERTS the failure mode: a future unknown shell construction the tokenizer
+// mis-parses yields empty targets -> over-block (safe), never a silent bypass.
+// KNOWN, ACCEPTED OVER-BLOCK (documented for the T3 decision list): a legitimate
+// RELATIVE / $VAR / ~ write (`echo x > out.txt`, `mkdir build`, `touch x`) has
+// write-intent and no ABSOLUTE target -> now uncertain -> DENY.
+export function extractAbsoluteTargets(seg, opts = {}) {
+  const { words, uncertain: tokUncertain, hadWriteRedirect } = tokenizeWords(seg)
   const targets = []
-  for (const piece of pieces) {
-    // piece has no quotes (masked) and no redirect operators (split out), so a
-    // greedy non-space run cannot span an operator or a quote boundary.
-    for (const m of piece.matchAll(/(?:^|\s)(\/\S+)/g)) {
-      const p = m[1]
-      if (!DEVICE_PATH_RX.test(p)) targets.push(p)
-    }
+  let sawDeviceTarget = false
+  for (const w of words) {
+    // A word is a write/arg target iff its reconstructed value is an absolute
+    // path. Device sinks (/dev/null ...) are not gateable targets.
+    if (!w.startsWith('/')) continue
+    if (DEVICE_PATH_RX.test(w)) { sawDeviceTarget = true; continue }
+    targets.push(w)
+  }
+  let uncertain = tokUncertain
+  // Layer 1 -- OPT-IN (opts.writeIntent) fail-closed on a REAL write redirect
+  // whose target we could NOT resolve to an absolute non-device path. It keys
+  // off the tokenizer's QUOTE-AWARE hadWriteRedirect (so a quoted `>` in a pure
+  // read like `grep ">" f` does NOT count) and ignores device-only writes
+  // (`cat a>/dev/null`), so the fail-closed inverts the failure mode for a HIDDEN
+  // real target without FP-ing on reads/device-noise. nano-worktree-guard opts in
+  // (its relative writes are replaceable with absolute paths); skill-write-guard
+  // does NOT (blanket fail-close would deny every relative write on all 5 agents)
+  // and relies on the tokenizer + raw-substring layer 2. See the T3 over-block
+  // list in the handoff.
+  if (opts.writeIntent === true && hadWriteRedirect && targets.length === 0 && !sawDeviceTarget) {
+    uncertain = true
   }
   return { targets, uncertain }
 }

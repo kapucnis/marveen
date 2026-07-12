@@ -223,3 +223,20 @@ describe('bashSkillTargets: no-space redirect gap CLOSED', () => {
     expect(bashSkillTargets("echo '-> /h/.claude/skills/x/SKILL.md'", ROOTS)).toHaveLength(0)
   })
 })
+
+// --- glued real-path + no-space redirect (kanban c54aa473) --------------------
+describe('bashSkillTargets: glued-path redirect boundary (c54aa473)', () => {
+  it('flags a skill target HIDDEN behind a real read-source path (was a BYPASS)', () => {
+    // `cat /real/file>/skill/path` used to fuse into one bogus token -> no hit
+    const h = bashSkillTargets('cat /h/notes.md>/h/.claude/skills/evil/SKILL.md', ROOTS)
+    expect(h.some((x) => x.kind === 'global-skill')).toBe(true)
+  })
+  it('fail-closed: an unbalanced-quote write is an `uncertain` hit -> evaluate DENY', () => {
+    const h = bashSkillTargets('echo x >/h/.claude/skills/"evil', ROOTS)
+    expect(h.some((x) => x.kind === 'uncertain')).toBe(true)
+    expect(evaluate({ kind: 'uncertain', realPath: 'x', grants: [], consumed: [], now: NOW }).deny).toBe(true)
+  })
+  it('a plain relative write is NOT uncertain (no mass FP)', () => {
+    expect(bashSkillTargets('echo x > out.txt', ROOTS)).toHaveLength(0)
+  })
+})

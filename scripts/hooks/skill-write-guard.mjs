@@ -253,6 +253,9 @@ export function approvalCovers(grants, realPath, now, consumed = []) {
 // record it in the audit log".
 export function evaluate({ kind, realPath, grants, consumed, now }) {
   if (!kind) return { deny: false }
+  if (kind === 'uncertain') {
+    return { deny: true, why: 'bizonytalan write-target a skill-guard extrakcioban (redirect-hatar nem parse-olhato egyertelmuen) -- fail-closed. Ha jogos, hasznalj egyertelmu (szokozzel elvalasztott, idezojel nelkuli) abszolut utat, vagy kerd EliteAI-t.' }
+  }
   if (kind === 'guard-token' || kind === 'guard-log' || kind === 'guard-consumed') {
     const which = kind === 'guard-token' ? 'jovahagyas-tokenje' : kind === 'guard-log' ? 'audit-logja' : 'nonce-ledgerje'
     return { deny: true, why: `a skill-guard sajat ${which} (${realPath}) tool-hivasbol NEM irhato -- EliteAI provisionalja out-of-band, a guard csak olvassa/vezeti` }
@@ -299,10 +302,13 @@ export function bashSkillTargets(command, roots = {}) {
   for (const seg of splitSegments(cmd)) {
     if (!WRITE_INTENT_RX.test(seg)) continue
     const isDelete = /\brm\b/.test(seg)
-    // Shared extractor: also catches no-space redirect targets (`x>/skill/path`)
-    // the old `(?:^|\s)(\/...)` missed -- a fail-open skill-write-ban bypass.
-    const tokens = extractAbsoluteTargets(seg)
-    for (const t of tokens) {
+    // Shared extractor: redirect-boundary-aware, returns { targets, uncertain }.
+    const { targets, uncertain } = extractAbsoluteTargets(seg)
+    // Fail-closed (c54aa473): an un-tokenizable write (unbalanced quote, or a
+    // redirect whose target is invisible) could HIDE a skill-path target the
+    // way `cat /home/x>/skill/path` did -> force a deny via a synthetic hit.
+    if (uncertain) { hits.push({ real: seg.slice(0, 120), kind: 'uncertain', action: isDelete ? 'delete' : 'modify' }); continue }
+    for (const t of targets) {
       const real = resolveReal(t.trim())
       const kind = classifyTarget(real, roots)
       if (kind) hits.push({ real, kind, action: isDelete ? 'delete' : 'modify' })

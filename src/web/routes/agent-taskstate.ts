@@ -4,9 +4,11 @@ import {
   writeTaskState,
   markConsumed,
   clearTaskState,
-  shouldReplayTaskState,
-  buildTaskStateInjection,
+  chooseReplayInjection,
+  HOT_REPLAY_WINDOW_MS,
+  HOT_REPLAY_LIMIT,
 } from '../agent-taskstate.js'
+import { getHotMemoriesForReplay } from '../../db.js'
 import type { RouteContext } from './types.js'
 
 // Endpoints for the compact task-state re-injection feature (#4).
@@ -26,11 +28,16 @@ export async function tryHandleAgentTaskState(ctx: RouteContext): Promise<boolea
   if (replayMatch && method === 'GET') {
     const agent = decodeURIComponent(replayMatch[1])
     const source = url.searchParams.get('source') || ''
+    const now = Date.now()
     const record = readTaskState(agent)
-    const inject = shouldReplayTaskState(record, source, Date.now())
-      ? buildTaskStateInjection(record!)
-      : null
-    json(res, { additionalContext: inject })
+    // F2 hot-memory net is a fallback only for resume|startup (never compact);
+    // fetch the candidate hot memories for those sources so chooseReplayInjection
+    // can use them when no valid dedicated task-state exists.
+    const hot = (source === 'resume' || source === 'startup')
+      ? getHotMemoriesForReplay(agent, now - HOT_REPLAY_WINDOW_MS, HOT_REPLAY_LIMIT)
+      : []
+    const { text } = chooseReplayInjection(record, source, now, hot)
+    json(res, { additionalContext: text })
     return true
   }
 

@@ -862,6 +862,23 @@ export function getAgentMemories(agentId: string, limit: number = 20): Memory[] 
   ).all(agentId, limit) as Memory[]
 }
 
+// F2 hot-memory safety net (taskstate replay fallback). Returns the agent's own
+// recent HOT-tier memories as { content, ts(ms) } rows, newest first. Filters by
+// created_at (NOT accessed_at -- a read must not resurrect a stale hot memory;
+// D1). `sinceMs` bounds the freshness window; the caller (agent-taskstate
+// buildHotFallbackInjection) re-applies window/limit/cap defensively.
+export function getHotMemoriesForReplay(
+  agentId: string,
+  sinceMs: number,
+  limit: number = 5,
+): { content: string; ts: number }[] {
+  const sinceSec = Math.floor(sinceMs / 1000)
+  const rows = db.prepare(
+    "SELECT content, created_at FROM memories WHERE agent_id = ? AND category = 'hot' AND created_at >= ? ORDER BY created_at DESC LIMIT ?"
+  ).all(agentId, sinceSec, limit) as { content: string; created_at: number }[]
+  return rows.map((r) => ({ content: r.content, ts: r.created_at * 1000 }))
+}
+
 export function searchAgentMemories(agentId: string, query: string, limit: number = 10): Memory[] {
   const terms = buildFtsMatchExpression(query)
   if (!terms) return []

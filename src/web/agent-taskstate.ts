@@ -23,9 +23,35 @@ const STORE_DIR = join(PROJECT_ROOT, 'store', 'agent-taskstate')
 // truly abandoned record without risking dropping a real long-running task.
 export const TASKSTATE_TTL_MS = 12 * 60 * 60 * 1000
 
-// SessionStart sources we replay on. NOT 'startup' (a cold start has no
-// in-flight task to resume) -- only an in-place compact or a resume/respawn.
-const REPLAY_SOURCES = new Set(['compact', 'resume'])
+// U4 (F1 precondition): 'startup' is a replay source too, because a graceful
+// pre-restart DRAIN followed by a FRESH restart (no --continue) yields a new
+// session whose SessionStart source is 'startup' -- NOT resume/compact. Without
+// 'startup' here the dominant restart path could never re-inject.
+//
+// The "a cold start has no in-flight task" principle is NOT dropped -- it now
+// rides on a TWO-LAYER RECORD GATE rather than a source exclusion:
+//   layer 1: source must be in REPLAY_SOURCES,
+//   layer 2: a FRESH, unconsumed, non-empty record must exist within the
+//            source's TTL. For 'startup' the TTL is deliberately SHORT
+//            (STARTUP_TTL_MS, 60 min) -- a drain writes the record seconds
+//            before the fresh restart, so a genuine cold boot (no recent drain)
+//            finds no fresh record and no-ops. compact/resume keep the generous
+//            12h TTL (a long-running task may compact many hours in).
+const REPLAY_SOURCES = new Set(['compact', 'resume', 'startup'])
+
+// Short TTL for the 'startup' source only: the record must have been written by
+// a drain in the last hour to count as an in-flight task on a fresh restart.
+export const STARTUP_TTL_MS = 60 * 60 * 1000
+
+/** The effective replay TTL for a SessionStart source (U4: startup is short). */
+export function replayTtlForSource(source: string): number {
+  return source === 'startup' ? STARTUP_TTL_MS : TASKSTATE_TTL_MS
+}
+
+// F2 hot-memory safety net tuning (see buildHotFallbackInjection).
+export const HOT_REPLAY_WINDOW_MS = 24 * 60 * 60 * 1000 // only "fresh" hot memories
+export const HOT_REPLAY_LIMIT = 5                        // top-N most recent
+export const HOT_REPLAY_CHAR_CAP = 2000                  // total injected chars cap
 
 export interface AgentTaskState {
   agent: string
@@ -63,15 +89,19 @@ export function isEmptyTaskState(r: Pick<AgentTaskState, 'doneSteps' | 'alreadyD
 }
 
 /**
- * Pure decision: should this record be re-injected at SessionStart?
- * Replays ONLY when: record exists, not yet consumed, source is compact|resume
- * (never cold startup), within TTL, and the record actually holds a task.
+ * Pure decision: should this dedicated task-state record be re-injected at
+ * SessionStart? Replays ONLY when: record exists, not yet consumed, source is
+ * compact|resume|startup, within the SOURCE'S TTL (startup = 60 min, others =
+ * 12h -- U4 two-layer record gate), and the record actually holds a task.
+ *
+ * When `ttlMs` is omitted the source-appropriate TTL is used; callers may pass
+ * an explicit override (the existing compact/resume tests do).
  */
 export function shouldReplayTaskState(
   record: AgentTaskState | null,
   source: string,
   nowMs: number,
-  ttlMs: number = TASKSTATE_TTL_MS,
+  ttlMs: number = replayTtlForSource(source),
 ): boolean {
   if (!record) return false
   if (record.consumed) return false
@@ -99,6 +129,88 @@ export function buildTaskStateInjection(r: AgentTaskState): string {
   if (r.nextAction.trim()) lines.push(`KOVETKEZO AKCIO (innen folytasd): ${r.nextAction.trim()}`)
   if (r.pendingDecision.trim()) lines.push(`NYITOTT DONTES / BLOKKOLO: ${r.pendingDecision.trim()}`)
   return lines.join('\n\n')
+}
+
+// --- F2: hot-memory safety net ----------------------------------------------
+// When there is NO valid dedicated task-state record (e.g. a raw tmux kill with
+// no drain, or the drain's POST failed), a fresh/resumed session would start
+// context-blind. As a lower-confidence fallback we reconstruct an "open task"
+// hint from the agent's most recent HOT-tier memories. This is DELIBERATELY
+// labelled as reconstructed/uncertain so the agent verifies before acting.
+//
+// One recency timestamp per row (created_at, in ms -- NOT accessed_at, so a mere
+// read never resurrects a stale hot memory; D1, Nano). The DB query pre-filters,
+// but the builder ALSO enforces the window/limit/cap so the pure function is
+// independently correct (a >24h row passed in is still dropped -- T-TS5).
+
+export interface HotMemoryRow {
+  content: string
+  ts: number // recency (created_at), epoch MS
+}
+
+const HOT_SENTINEL = '=== REKONSTRUALT KONTEKSTUS (alacsonyabb konfidencia, NEM megerositett task-state) ==='
+
+/**
+ * Build the hot-memory fallback additionalContext, or null if there is nothing
+ * fresh to say. Filters to non-empty rows within the window, most-recent first,
+ * caps to `limit` rows and `charCap` total characters. 0 fresh rows -> null (an
+ * empty block is never injected).
+ */
+export function buildHotFallbackInjection(
+  memories: HotMemoryRow[],
+  nowMs: number,
+  opts: { windowMs?: number; limit?: number; charCap?: number } = {},
+): string | null {
+  const windowMs = opts.windowMs ?? HOT_REPLAY_WINDOW_MS
+  const limit = opts.limit ?? HOT_REPLAY_LIMIT
+  const charCap = opts.charCap ?? HOT_REPLAY_CHAR_CAP
+
+  const fresh = (Array.isArray(memories) ? memories : [])
+    .filter((m) => m && typeof m.content === 'string' && m.content.trim() && typeof m.ts === 'number' && nowMs - m.ts <= windowMs)
+    .sort((a, b) => b.ts - a.ts)
+    .slice(0, limit)
+  if (fresh.length === 0) return null
+
+  const header = [
+    HOT_SENTINEL,
+    'Nincs mentett task-state rekord (a mostani restart nem draint, vagy nyers kill volt). Az alabbi a legutobbi HOT-tier emlekekbol REKONSTRUALT nyitott-feladat kontextus -- alacsonyabb konfidencia. ELLENORIZD mielott folytatod, es NE indits ujra semmit pusztan ezek alapjan.',
+  ].join('\n\n')
+
+  const bullets: string[] = []
+  let used = header.length
+  for (const m of fresh) {
+    const line = `  - ${m.content.trim().replace(/\s+/g, ' ')}`
+    // +2 for the '\n\n' join separator between header/body and between bullets.
+    if (used + line.length + 2 > charCap) break
+    bullets.push(line)
+    used += line.length + 1
+  }
+  if (bullets.length === 0) return null // header alone would exceed the cap
+  return `${header}\n\nLEGUTOBBI HOT EMLEKEK:\n${bullets.join('\n')}`
+}
+
+export type ReplayKind = 'taskstate' | 'hot-fallback' | 'none'
+
+/**
+ * Single pure entry for the replay decision (makes the T-TS matrix directly
+ * assertable): dedicated task-state is PRIMARY; the hot-memory net is a
+ * secondary fallback ONLY when there is no valid task-state AND the source is
+ * resume|startup (NEVER compact -- a compact keeps Claude's own summary).
+ */
+export function chooseReplayInjection(
+  record: AgentTaskState | null,
+  source: string,
+  nowMs: number,
+  hotMemories: HotMemoryRow[],
+): { kind: ReplayKind; text: string | null } {
+  if (shouldReplayTaskState(record, source, nowMs)) {
+    return { kind: 'taskstate', text: buildTaskStateInjection(record!) }
+  }
+  if (source === 'resume' || source === 'startup') {
+    const text = buildHotFallbackInjection(hotMemories, nowMs)
+    return { kind: text ? 'hot-fallback' : 'none', text }
+  }
+  return { kind: 'none', text: null }
 }
 
 export function readTaskState(agent: string): AgentTaskState | null {

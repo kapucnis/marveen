@@ -7,11 +7,20 @@ import {
   agentSessionName,
   restartAgentProcess,
   capturePane,
+  sendPromptToSession,
 } from './agent-process.js'
 import { MAIN_CHANNELS_SESSION } from './main-agent.js'
 import { paneLooksIdle } from '../pane-state.js'
 import { readAutoRestartConfig } from './auto-restart-store.js'
 import { restartDue, dailyDueAtMs, parseHHMM, type AutoRestartConfig } from '../auto-restart.js'
+import { readTaskState } from './agent-taskstate.js'
+import {
+  DRAIN_TIMEOUT_MS,
+  DRAIN_POLL_MS,
+  shouldDrainBeforeRestart,
+  performDrainAndRestart,
+  type DrainDeps,
+} from '../auto-restart-drain.js'
 
 // Drives per-agent scheduled restarts (see src/auto-restart.ts for the why and
 // the pure due-logic). Mirrors the other watcher loops: a 60s sweep, started
@@ -32,6 +41,26 @@ const INTERVAL_MS = 60_000
 // restart) so a past-due daily slot does not fire at startup. In-memory: a
 // dashboard restart re-seeds, at worst skipping one slot -- never double-fires.
 const lastRestart = new Map<string, number>()
+
+// F1 pre-restart drain: agents currently mid-drain (A4 -- never run two
+// overlapping drains for the same agent; overlapping sweeps would double-inject).
+// The drain decision + orchestration are pure/injectable in ../auto-restart-drain.js;
+// this runner only wires the real tmux/process/store deps.
+const draining = new Set<string>()
+
+function defaultDrainDeps(name: string): DrainDeps {
+  return {
+    sendPrompt: (session, text, host) => sendPromptToSession(session, text, host),
+    restart: (n, c) => restartAgentProcess(n, { fresh: c.mode === 'fresh' }),
+    readState: readTaskState,
+    now: () => Date.now(),
+    sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+    timeoutMs: DRAIN_TIMEOUT_MS,
+    pollMs: DRAIN_POLL_MS,
+    session: sessionFor(name),
+    host: readAgentRemoteHost(name),
+  }
+}
 
 function localMidnightMs(nowMs: number): number {
   const d = new Date(nowMs)
@@ -107,6 +136,24 @@ function checkAgent(name: string, nowMs: number): void {
   const host = name === MAIN_AGENT_ID ? null : readAgentRemoteHost(name)
   if (!paneIsIdle(session, host)) {
     logger.info({ name, session }, 'auto-restart: due but pane is busy, deferring to next tick')
+    return
+  }
+
+  // A3 -- idle-guard ORDER is fixed: idle-check -> restart-decision -> [drain]
+  // -> kill. The drain below makes the pane BUSY while the agent persists its
+  // task-state; that busy state MUST NOT be re-evaluated as the idle-guard (the
+  // restart decision is already made here). Do NOT move the idle-check after the
+  // drain and do NOT add an idle re-check inside the drain -- either would
+  // deadlock the very restart the drain was asked to protect. (Nano, A3.)
+  if (shouldDrainBeforeRestart(cfg, name === MAIN_AGENT_ID)) {
+    // A4: never overlap two drains for the same agent.
+    if (draining.has(name)) return
+    draining.add(name)
+    // Optimistic: record the restart time NOW so restartDue does not re-fire
+    // while the async drain+restart is in flight (belt with the draining flag).
+    lastRestart.set(name, nowMs)
+    logger.info({ name }, 'auto-restart: draining before fresh restart')
+    void performDrainAndRestart(name, cfg, defaultDrainDeps(name)).finally(() => draining.delete(name))
     return
   }
 

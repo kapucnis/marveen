@@ -9,7 +9,12 @@ import {
   clearTaskState,
   sweepOrphanTaskStates,
   TASKSTATE_TTL_MS,
+  STARTUP_TTL_MS,
+  replayTtlForSource,
+  buildHotFallbackInjection,
+  chooseReplayInjection,
   type AgentTaskState,
+  type HotMemoryRow,
 } from '../web/agent-taskstate.js'
 
 const NOW = 1_700_000_000_000
@@ -33,8 +38,20 @@ describe('shouldReplayTaskState', () => {
   it('replays on resume too', () => {
     expect(shouldReplayTaskState(rec(), 'resume', NOW + 1000)).toBe(true)
   })
-  it('does NOT replay on cold startup', () => {
-    expect(shouldReplayTaskState(rec(), 'startup', NOW + 1000)).toBe(false)
+  // U4 (behaviour CHANGE from the original feature): 'startup' now DOES replay,
+  // but strictly record-gated by a SHORT (60min) TTL -- so the dominant fresh-
+  // restart path (drain writes a record seconds before the startup) re-injects,
+  // while a genuine cold boot (no fresh record) still no-ops via the record gate.
+  it('DOES replay on startup with a FRESH record (U4 -- within the 60min gate)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', NOW + 1000)).toBe(true)
+  })
+  it('does NOT replay on startup once the record is older than the 60min gate (T-TS7 basis)', () => {
+    expect(shouldReplayTaskState(rec(), 'startup', NOW + STARTUP_TTL_MS + 1)).toBe(false)
+  })
+  it('startup honors the SHORT ttl, not the 12h one (a 2h-old record is stale for startup)', () => {
+    // 2h old: fine for compact (12h ttl), stale for startup (60min ttl).
+    expect(shouldReplayTaskState(rec(), 'compact', NOW + 2 * 60 * 60 * 1000)).toBe(true)
+    expect(shouldReplayTaskState(rec(), 'startup', NOW + 2 * 60 * 60 * 1000)).toBe(false)
   })
   it('does NOT replay a consumed record', () => {
     expect(shouldReplayTaskState(rec({ consumed: true }), 'compact', NOW + 1000)).toBe(false)
@@ -119,5 +136,101 @@ describe('task-state store I/O', () => {
     const r = readTaskState('../../etc/passwd')
     expect(r).not.toBeNull()
     clearTaskState('../../etc/passwd')
+  })
+})
+
+// --- U4: source-dependent replay TTL ----------------------------------------
+describe('replayTtlForSource (U4)', () => {
+  it('startup uses the short 60min ttl', () => {
+    expect(replayTtlForSource('startup')).toBe(STARTUP_TTL_MS)
+  })
+  it('compact/resume use the generous 12h ttl', () => {
+    expect(replayTtlForSource('compact')).toBe(TASKSTATE_TTL_MS)
+    expect(replayTtlForSource('resume')).toBe(TASKSTATE_TTL_MS)
+  })
+})
+
+// --- F2: hot-memory fallback builder (pure) ---------------------------------
+describe('buildHotFallbackInjection (F2)', () => {
+  const hot = (over: Partial<HotMemoryRow> = {}): HotMemoryRow => ({ content: 'nyitott: X ellenorzese', ts: NOW, ...over })
+
+  it('builds a LABELLED lower-confidence block from fresh hot memories', () => {
+    const out = buildHotFallbackInjection([hot()], NOW + 1000)!
+    expect(out).toContain('REKONSTRUALT KONTEKSTUS')
+    expect(out).toContain('alacsonyabb konfidencia')
+    expect(out).toContain('nyitott: X ellenorzese')
+  })
+  it('returns null when there are NO hot memories (T-TS9 basis)', () => {
+    expect(buildHotFallbackInjection([], NOW)).toBeNull()
+  })
+  it('returns null when every hot memory is older than the 24h window (T-TS5 basis)', () => {
+    const old = hot({ ts: NOW - (25 * 60 * 60 * 1000) })
+    expect(buildHotFallbackInjection([old], NOW)).toBeNull()
+  })
+  it('skips empty-content rows', () => {
+    expect(buildHotFallbackInjection([hot({ content: '   ' })], NOW)).toBeNull()
+  })
+  it('caps to the top-5 most recent', () => {
+    const rows = Array.from({ length: 9 }, (_, i) => hot({ content: `mem-${i}`, ts: NOW - i * 1000 }))
+    const out = buildHotFallbackInjection(rows, NOW)!
+    // newest-first: mem-0..mem-4 present, mem-5+ excluded
+    expect(out).toContain('mem-0')
+    expect(out).toContain('mem-4')
+    expect(out).not.toContain('mem-5')
+  })
+  it('enforces the total char cap', () => {
+    const big = Array.from({ length: 5 }, (_, i) => hot({ content: 'x'.repeat(1000), ts: NOW - i }))
+    const out = buildHotFallbackInjection(big, NOW, { charCap: 1500 })!
+    expect(out.length).toBeLessThanOrEqual(1600) // header + a couple bullets, hard-bounded
+  })
+})
+
+// --- F2 + primary: the single replay decision -------------------------------
+describe('chooseReplayInjection (F2 orchestration)', () => {
+  const hot: HotMemoryRow[] = [{ content: 'hot open task', ts: NOW }]
+
+  it('PRIMARY: a valid task-state wins over the hot net (startup)', () => {
+    const d = chooseReplayInjection(rec(), 'startup', NOW + 1000, hot)
+    expect(d.kind).toBe('taskstate')
+    expect(d.text).toContain('TASK-FOLYTATAS')
+  })
+  it('FALLBACK: no task-state + resume -> hot-fallback (T-TS2 basis)', () => {
+    const d = chooseReplayInjection(null, 'resume', NOW, hot)
+    expect(d.kind).toBe('hot-fallback')
+    expect(d.text).toContain('REKONSTRUALT')
+  })
+  it('FALLBACK: no task-state + startup -> hot-fallback', () => {
+    expect(chooseReplayInjection(null, 'startup', NOW, hot).kind).toBe('hot-fallback')
+  })
+  it('compact NEVER uses the hot net (keeps its own summary)', () => {
+    const d = chooseReplayInjection(null, 'compact', NOW, hot)
+    expect(d.kind).toBe('none')
+    expect(d.text).toBeNull()
+  })
+  it('no task-state + no fresh hot -> none (T-TS9)', () => {
+    expect(chooseReplayInjection(null, 'startup', NOW, []).kind).toBe('none')
+  })
+  it('no task-state + only STALE hot -> none (T-TS5)', () => {
+    const stale: HotMemoryRow[] = [{ content: 'old', ts: NOW - 25 * 60 * 60 * 1000 }]
+    expect(chooseReplayInjection(null, 'startup', NOW, stale).kind).toBe('none')
+  })
+})
+
+// --- T-TS1 / T-TS7 at the store level (real round-trip) ---------------------
+describe('startup replay end-to-end via the store (T-TS1 / T-TS7)', () => {
+  const A = 'vitest-taskstate-startup'
+  afterEach(() => clearTaskState(A))
+
+  it('T-TS1: a fresh drained record injects on the STARTUP source', () => {
+    writeTaskState(A, { summary: 'building X', nextAction: 'open the PR' }, NOW)
+    const d = chooseReplayInjection(readTaskState(A), 'startup', NOW + 5000, [])
+    expect(d.kind).toBe('taskstate')
+    expect(d.text).toContain('open the PR')
+  })
+  it('T-TS7: a STALE record (>60min) does NOT inject on startup (record gate holds)', () => {
+    writeTaskState(A, { nextAction: 'stale next' }, NOW)
+    const d = chooseReplayInjection(readTaskState(A), 'startup', NOW + STARTUP_TTL_MS + 1, [])
+    expect(d.kind).toBe('none')
+    expect(d.text).toBeNull()
   })
 })

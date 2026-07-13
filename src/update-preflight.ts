@@ -12,11 +12,15 @@
 // update.sh makes it exit before the stop.sh / start.sh step, but the
 // frontend has no way to know because it only watched spawn() success.
 //
-// The update is branch-agnostic: update.sh derives the branch from the
-// current checkout and pulls origin/<that-branch>, so an install that
-// tracks any release branch (main, develop, …) self-updates. The only
-// branch state this preflight rejects is a detached HEAD, which has no
-// branch to pull.
+// The update follows the current checkout: update.sh derives the branch and
+// pulls origin/<that-branch>, so an install tracking any release branch that
+// EXISTS ON ORIGIN self-updates. Two branch states are rejected: a detached
+// HEAD (no branch to pull), and a branch that is not present on origin -- a
+// divergent fork whose one-click pull would otherwise die at update.sh's own
+// `git ls-remote --exit-code` guard. That fork check is a NETWORK probe, so it
+// is fail-open: only a definitive "branch absent" (ls-remote exit 2) blocks;
+// any network/auth/timeout error passes through and lets update.sh remain the
+// final enforcing layer (a flaky network must never fake a "branch missing").
 //
 // Running the preflight checks server-side means the apply endpoint can
 // refuse with a 409 and a readable reason, the user sees an actionable
@@ -26,6 +30,12 @@
 // The module takes its git calls through a GitRunner interface so the
 // decision logic is pure and synchronously testable without shelling
 // out in tests.
+
+// Result of probing whether the current branch exists on origin. Deliberately
+// three-valued: 'unknown' (a network/auth/timeout error) MUST NOT be conflated
+// with 'absent' (a definitive ls-remote exit 2), so a flaky network can never
+// fabricate a false "branch missing" block.
+export type BranchOnOrigin = 'present' | 'absent' | 'unknown'
 
 export interface GitRunner {
   // Current branch name. "HEAD" (or empty) signals a detached checkout.
@@ -41,12 +51,18 @@ export interface GitRunner {
   // ad-hoc backup files (CLAUDE.md.backup-*, SOUL.md mid-edit, etc.)
   // that should not block an update.
   porcelainStatus(): string
+  // Whether `branch` exists on origin (git ls-remote --exit-code --heads
+  // origin <branch>). A NETWORK call -- the implementation must map exit 0 ->
+  // 'present', exit 2 -> 'absent', and ANY other failure (128, timeout,
+  // auth) -> 'unknown'. Only 'absent' blocks; 'unknown' is fail-open.
+  branchOnOrigin(branch: string): BranchOnOrigin
 }
 
 export type PreflightResult =
   | { ok: true }
   | { ok: false; reason: 'dirty-tree'; message: string }
   | { ok: false; reason: 'detached-head'; message: string }
+  | { ok: false; reason: 'branch-not-on-origin'; message: string }
   | { ok: false; reason: 'local-commits'; message: string; ahead: number }
 
 // Concurrency gate: refuse a second /api/updates/apply while the first
@@ -141,6 +157,29 @@ export function checkUpdatePreflight(git: GitRunner): PreflightResult {
       message:
         'Repository is in a detached-HEAD state. ' +
         'Check out a release branch before updating, e.g.: git checkout main',
+    }
+  }
+
+  // The branch must exist on origin, otherwise update.sh's `git pull --ff-only
+  // origin <branch>` has no ref to fast-forward to and dies at its own
+  // ls-remote guard (a silent detached death this preflight exists to surface).
+  // This is a NETWORK probe and is fail-open: ONLY a definitive 'absent'
+  // (ls-remote exit 2) blocks. 'unknown' (network/auth/timeout) passes through
+  // so a flaky network cannot fabricate a false "branch missing"; update.sh
+  // stays the final enforcing layer. The message names the real cause -- this
+  // install is a divergent fork -- and points at the actual update path (the
+  // fleet-update-watch process), not the one-click pull that cannot apply here.
+  if (git.branchOnOrigin(branch) === 'absent') {
+    return {
+      ok: false,
+      reason: 'branch-not-on-origin',
+      message:
+        `The current branch '${branch}' does not exist on origin, so a ` +
+        'fast-forward update has no upstream ref to pull. This install is a ' +
+        'DIVERGENT FORK (it tracks a branch that was never pushed to origin), ' +
+        'and the one-click update cannot apply here. Update this install through ' +
+        'the fleet-update-watch process instead (the categorised SAFE install ' +
+        'plan, then the Yoda/EliteAI merge-build-deploy round), not a direct pull.',
     }
   }
 

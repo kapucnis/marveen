@@ -62,7 +62,7 @@ export type PreflightResult =
   | { ok: true }
   | { ok: false; reason: 'dirty-tree'; message: string }
   | { ok: false; reason: 'detached-head'; message: string }
-  | { ok: false; reason: 'branch-not-on-origin'; message: string }
+  | { ok: false; reason: 'branch-not-on-origin'; message: string; branch: string }
   | { ok: false; reason: 'local-commits'; message: string; ahead: number }
 
 // Concurrency gate: refuse a second /api/updates/apply while the first
@@ -173,6 +173,7 @@ export function checkUpdatePreflight(git: GitRunner): PreflightResult {
     return {
       ok: false,
       reason: 'branch-not-on-origin',
+      branch,
       message:
         `The current branch '${branch}' does not exist on origin, so a ` +
         'fast-forward update has no upstream ref to pull. This install is a ' +

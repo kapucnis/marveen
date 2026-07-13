@@ -261,6 +261,9 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
           error: preflight.message,
           reason: preflight.reason,
         }
+        // branch-not-on-origin carries the branch so the frontend can render a
+        // SHORT localized toast + a localized detail panel (not the raw message).
+        if (preflight.reason === 'branch-not-on-origin') body.branch = preflight.branch
         json(res, body, 409)
         return true
       }

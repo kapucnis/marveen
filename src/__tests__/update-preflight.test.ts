@@ -149,9 +149,12 @@ describe('checkUpdatePreflight --branch not on origin (divergent fork)', () => {
     expect(result.reason).toBe('branch-not-on-origin')
   })
 
-  it('carries no branch field on the rejection (branch is in the message only)', () => {
+  it('carries the branch on the rejection (frontend renders a localized detail from it)', () => {
     const result = checkUpdatePreflight(makeGit('forkbranch', '', 0, 'absent'))
-    expect(Object.hasOwn(result, 'branch')).toBe(false)
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    if (result.reason !== 'branch-not-on-origin') return
+    expect(result.branch).toBe('forkbranch')
   })
 })
 
@@ -190,9 +193,10 @@ describe('checkUpdatePreflight --dirty working tree', () => {
 })
 
 describe('checkUpdatePreflight -- result shape', () => {
-  it('never emits a branch field on any path', () => {
-    // No result carries a branch field anymore; the update is
-    // branch-agnostic, so the branch name is never part of a rejection.
+  it('emits a branch field ONLY on branch-not-on-origin, never on the other paths', () => {
+    // The branch name is part of a rejection ONLY for the divergent-fork case
+    // (branch-not-on-origin), where the frontend renders a localized detail from
+    // it. Every other path stays branch-free.
     const ok = checkUpdatePreflight(makeGit('main'))
     expect(Object.hasOwn(ok, 'branch')).toBe(false)
 

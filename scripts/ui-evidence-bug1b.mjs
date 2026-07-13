@@ -40,9 +40,12 @@ initDatabase(':memory:')
 const server = startWebServer(PORT)
 await new Promise((r) => setTimeout(r, 600))
 
+const VW = { width: 1280, height: 720 }   // Yoda F-1 regression viewport
 const browser = await chromium.launch()
-const page = await browser.newPage()
+const page = await browser.newPage({ viewport: VW })
+page.on('dialog', (d) => d.accept())      // auto-accept the apply confirm()
 let failed = false
+const fail = (m) => { console.error('FAIL: ' + m); failed = true }
 try {
   await page.goto(`http://localhost:${PORT}/?token=${TOKEN}`, { waitUntil: 'domcontentloaded' })
   await page.waitForTimeout(400)
@@ -58,33 +61,40 @@ try {
     return { status: r.status, body: await r.json().catch(() => ({})) }
   }, TOKEN)
   console.log('endpoint:', JSON.stringify(apiResult))
-  if (apiResult.status !== 409) { console.error(`FAIL: expected 409, got ${apiResult.status}`); failed = true }
-  if (apiResult.body.reason !== 'branch-not-on-origin') { console.error(`FAIL: reason=${apiResult.body.reason}`); failed = true }
-  if (!/divergent fork/i.test(apiResult.body.error || '')) { console.error('FAIL: message not fork-aware'); failed = true }
-  if (!/fleet-update-watch/i.test(apiResult.body.error || '')) { console.error('FAIL: message missing fleet-update-watch path'); failed = true }
+  if (apiResult.status !== 409) fail(`expected 409, got ${apiResult.status}`)
+  if (apiResult.body.reason !== 'branch-not-on-origin') fail(`reason=${apiResult.body.reason}`)
+  if (apiResult.body.branch !== 'nano/bug1b-preflight-branch-check') fail(`branch field=${apiResult.body.branch}`)
 
-  // (b) dashboard screenshot of the honest toast. Drive the SAME code path the
-  // "Frissítés most" button runs -- fetch /api/updates/apply and render its 409
-  // through the app's own showToast + localized string -- so the screenshot is
-  // exactly what Laci sees. (A long duration keeps the toast on screen for the
-  // capture; the real button uses the default 3s.)
+  // (b) drive the REAL button path -> short localized toast + fork-notice panel.
   await page.click('a.sb-link[data-page="updates"]')
   await page.waitForSelector('#updatesPage:not([hidden])', { timeout: 8000 })
-  await page.evaluate(async (token) => {
-    const r = await fetch('/api/updates/apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify({ autoStash: false }),
-    })
-    const data = await r.json().catch(() => ({}))
-    const msg = (typeof t === 'function') ? t('updates.toast.not_started', { msg: data.error }) : data.error
-    if (typeof showToast === 'function') showToast(msg, 60000)
-  }, TOKEN)
-  await page.waitForSelector('#toast.visible', { timeout: 5000 }).catch(() => {})
-  await page.waitForTimeout(400)
-  await page.screenshot({ path: `${OUT}/bug1b-preflight-409.png`, fullPage: true })
+  await page.evaluate(() => { const b = document.getElementById('updatesApplyBtn'); if (b) b.hidden = false })
+  await page.click('#updatesApplyBtn')
+  await page.waitForSelector('#toast.visible', { timeout: 6000 })
+  await page.waitForTimeout(300)
 
-  if (!failed) console.log('PASS: 409 branch-not-on-origin (no update.sh spawned), fork-aware toast; screenshot saved')
+  const toastText = (await page.locator('#toast').textContent())?.trim() || ''
+  const toastBox = await page.locator('#toast').boundingBox()
+  const forkVisible = await page.locator('#updatesForkNotice:not([hidden])').count()
+  const forkText = (await page.locator('#updatesForkNotice').textContent())?.trim() || ''
+
+  console.log('toast:', JSON.stringify({ len: toastText.length, box: toastBox }))
+  // F-1 regression: the toast is SHORT and fully inside the 1280x720 viewport.
+  if (toastText.length > 130) fail(`toast too long (${toastText.length} chars) -- not the short form`)
+  if (!toastBox) fail('toast has no bounding box')
+  else {
+    const within = toastBox.x >= 0 && toastBox.y >= 0 &&
+      (toastBox.x + toastBox.width) <= VW.width && (toastBox.y + toastBox.height) <= VW.height
+    if (!within) fail(`toast clips the viewport: ${JSON.stringify(toastBox)} vs ${JSON.stringify(VW)}`)
+  }
+  // The full explanation lives in the fork-notice panel (localized, with branch).
+  if (!forkVisible) fail('fork-notice panel not visible')
+  if (!/nano\/bug1b-preflight-branch-check/.test(forkText)) fail('fork-notice missing the branch name')
+  if (!/fleet-update-watch/i.test(forkText)) fail('fork-notice missing the fleet-update-watch guidance')
+
+  await page.screenshot({ path: `${OUT}/bug1b-preflight-409.png` })   // 1280x720 viewport
+
+  if (!failed) console.log('PASS: short toast within 1280x720 + fork-notice panel (localized, with branch); 409 before any update.sh spawn; screenshot saved')
 } catch (e) {
   console.error('ERROR', e)
   failed = true

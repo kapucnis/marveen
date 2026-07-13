@@ -1,22 +1,38 @@
-// BUG2 UI-evidence harness (Yoda-mandated). Starts ONLY the HTTP server
-// (startWebServer -- no schedulers, channel monitors or tmux touches), backed by
-// an in-memory DB seeded with Laci's exact crowd-out scenario: 55 fresh warm rows
-// + a SINGLE shared row with the oldest accessed_at. Then drives the real
-// dashboard UI with Playwright: opens the Memory panel, clicks the Shared tab,
-// and verifies the shared entry is visible and the counter matches the list.
+// BUG2 UI-evidence harness (Yoda-mandated). Drives the real dashboard UI with
+// Playwright against an in-memory DB seeded with Laci's exact crowd-out scenario:
+// 55 fresh warm rows + a SINGLE shared row with the oldest accessed_at. Opens the
+// Memory panel, clicks the Shared tab, verifies the shared entry is visible and
+// the counter matches the list.
+//
+// SAFETY (Yoda F-2): WEB_ONLY=true is MANDATORY. startWebServer otherwise boots
+// the full background constellation -- schedule runner, message router, channel
+// monitors, auto-restart runner -- and TWO tmux paths: the worker pre-start
+// (tmux new-session detached `claude --dangerously-skip-permissions`) and the
+// schedule runner, whose first tick reads task definitions from the REAL
+// ~/.claude/scheduled-tasks (file-based, not this in-memory DB) with a 30-minute
+// catch-up window and would inject tasks into LIVE tmux sessions. Earlier runs
+// only escaped because the script exited before the 60s first tick; that is luck,
+// not safety. WEB_ONLY disables all of it (web.ts honours it for exactly this
+// "staging preview must not conflict with the live fleet" case).
 //
 // Run from the worktree root AFTER `npm run build`:
 //   node scripts/ui-evidence-bug2.mjs
+process.env.WEB_ONLY = 'true'            // <-- disables schedulers/monitors/tmux (Yoda F-2)
 process.env.DASHBOARD_TOKEN = 'ui-evidence-bug2-token'
 process.env.NODE_ENV = 'test'
 
-const OUT = process.env.SHOT_DIR || '/tmp'
-const PORT = 3521
-
 const { initDatabase, getDb } = await import('../dist/db.js')
-const { ALLOWED_CHAT_ID } = await import('../dist/config.js')
+const { ALLOWED_CHAT_ID, PROJECT_ROOT } = await import('../dist/config.js')
 const { startWebServer } = await import('../dist/web.js')
 const { chromium } = await import('@playwright/test')
+const { mkdirSync } = await import('node:fs')
+const { join } = await import('node:path')
+
+// Durable screenshot location (Yoda F-2): /tmp gets reaped, leaving the evidence
+// unviewable. store/self-audit persists in the worktree the reviewer flips to.
+const OUT = process.env.SHOT_DIR || join(PROJECT_ROOT, 'store', 'self-audit')
+mkdirSync(OUT, { recursive: true })
+const PORT = 3521
 
 initDatabase(':memory:')
 const db = getDb()

@@ -68,29 +68,42 @@ export async function tryHandleMemories(ctx: RouteContext): Promise<boolean> {
     const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200)
     const mode = url.searchParams.get('mode') || 'fts'
 
+    // BUG2: the tier filter must be applied in SQL (WHERE ... category = ?)
+    // BEFORE the LIMIT on every path, otherwise a tier whose rows all have old
+    // accessed_at is crowded out of the top-N window by fresher rows in other
+    // tiers (the shared-counter-vs-list mismatch Laci hit). `category` is passed
+    // into each DB reader; the only remaining post-filter is the hybrid path.
+    const category = tier || undefined
+    const catClause = category ? ' AND category = ?' : ''
+    const catParam: string[] = category ? [category] : []
+
     let results: Memory[]
     if (q && mode === 'hybrid') {
       results = await hybridSearch(agentId || MAIN_AGENT_ID, q, limit)
+      // hybridSearch merges FTS+vector via RRF and slices to `limit` before we
+      // can see categories, so the tier filter here stays a POST-filter. This is
+      // the crowd-out limitation Yoda flagged as acceptable for hybrid (a
+      // targeted semantic search, far less prone to the top-N eviction than a
+      // bare tier listing).
+      if (category) results = results.filter(m => m.category === category)
     } else if (q && agentId) {
-      results = searchAgentMemories(agentId, q, limit)
+      results = searchAgentMemories(agentId, q, limit, category)
       if (results.length === 0) {
         const db2 = getDb()
-        results = db2.prepare("SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?")
-          .all(agentId, `%${q}%`, `%${q}%`, limit) as Memory[]
+        results = db2.prepare(`SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${catClause} AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?`)
+          .all(agentId, ...catParam, `%${q}%`, `%${q}%`, limit) as Memory[]
       }
     } else if (q) {
-      results = searchMemories(q, ALLOWED_CHAT_ID, limit)
+      results = searchMemories(q, ALLOWED_CHAT_ID, limit, category)
       if (results.length === 0) {
         const db2 = getDb()
-        results = db2.prepare('SELECT * FROM memories WHERE content LIKE ? ORDER BY accessed_at DESC LIMIT ?').all(`%${q}%`, limit) as Memory[]
+        results = db2.prepare(`SELECT * FROM memories WHERE content LIKE ?${catClause} ORDER BY accessed_at DESC LIMIT ?`).all(`%${q}%`, ...catParam, limit) as Memory[]
       }
     } else if (agentId) {
-      results = getAgentMemories(agentId, limit)
+      results = getAgentMemories(agentId, limit, category)
     } else {
-      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit)
+      results = getMemoriesForChat(ALLOWED_CHAT_ID, limit, category)
     }
-
-    if (tier) results = results.filter(m => m.category === tier)
 
     const formatted = results.map(m => ({
       ...m,

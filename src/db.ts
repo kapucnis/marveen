@@ -789,19 +789,21 @@ export function buildFtsMatchExpression(query: string): string {
   return tokens.join(' ')
 }
 
-export function searchMemories(query: string, chatId: string, limit = 3): Memory[] {
+export function searchMemories(query: string, chatId: string, limit = 3, category?: string): Memory[] {
   const terms = buildFtsMatchExpression(query)
   if (!terms) return []
+  const catClause = category ? ' AND m.category = ?' : ''
+  const catParam: string[] = category ? [category] : []
   try {
     return db
       .prepare(
         `SELECT m.* FROM memories m
          JOIN memories_fts f ON m.id = f.rowid
-         WHERE f.content MATCH ? AND m.chat_id = ?
+         WHERE f.content MATCH ? AND m.chat_id = ?${catClause}
          ORDER BY rank
          LIMIT ?`
       )
-      .all(terms, chatId, limit) as Memory[]
+      .all(terms, chatId, ...catParam, limit) as Memory[]
   } catch {
     return []
   }
@@ -827,7 +829,15 @@ export function decayMemories(): void {
   db.prepare('UPDATE memories SET salience = MAX(salience * 0.995, 0.01) WHERE created_at < ?').run(oneWeekAgo)
 }
 
-export function getMemoriesForChat(chatId: string, limit = 10): Memory[] {
+// `category` (optional tier filter) is applied in the SQL WHERE, BEFORE the
+// LIMIT -- so a tier that has only old-accessed_at rows is not crowded out of
+// the top-N window by fresher rows in other tiers (BUG2, Yoda spec).
+export function getMemoriesForChat(chatId: string, limit = 10, category?: string): Memory[] {
+  if (category) {
+    return db
+      .prepare('SELECT * FROM memories WHERE chat_id = ? AND category = ? ORDER BY accessed_at DESC LIMIT ?')
+      .all(chatId, category, limit) as Memory[]
+  }
   return db
     .prepare('SELECT * FROM memories WHERE chat_id = ? ORDER BY accessed_at DESC LIMIT ?')
     .all(chatId, limit) as Memory[]
@@ -856,7 +866,17 @@ export function saveAgentMemory(
   return { id }
 }
 
-export function getAgentMemories(agentId: string, limit: number = 20): Memory[] {
+// `category` (optional tier filter) applied in SQL before LIMIT (BUG2). The
+// combination agent + category='shared' yields WHERE (agent_id=? OR
+// category='shared') AND category='shared' == all shared rows the agent can see;
+// agent + category='hot' yields the agent's own hot rows (shared excluded). Both
+// correct -- covered by tests.
+export function getAgentMemories(agentId: string, limit: number = 20, category?: string): Memory[] {
+  if (category) {
+    return db.prepare(
+      "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND category = ? ORDER BY accessed_at DESC LIMIT ?"
+    ).all(agentId, category, limit) as Memory[]
+  }
   return db.prepare(
     "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') ORDER BY accessed_at DESC LIMIT ?"
   ).all(agentId, limit) as Memory[]
@@ -879,20 +899,26 @@ export function getHotMemoriesForReplay(
   return rows.map((r) => ({ content: r.content, ts: r.created_at * 1000 }))
 }
 
-export function searchAgentMemories(agentId: string, query: string, limit: number = 10): Memory[] {
+// `category` (optional tier filter) folded into the SQL WHERE on BOTH the FTS
+// path and the LIKE-fallback, before LIMIT -- same crowd-out fix as the
+// non-search readers (BUG2).
+export function searchAgentMemories(agentId: string, query: string, limit: number = 10, category?: string): Memory[] {
   const terms = buildFtsMatchExpression(query)
   if (!terms) return []
+  const catClause = category ? ' AND m.category = ?' : ''
+  const catParam: string[] = category ? [category] : []
   try {
     return db.prepare(
       `SELECT m.* FROM memories m
        JOIN memories_fts f ON m.id = f.rowid
-       WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')
+       WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')${catClause}
        ORDER BY rank LIMIT ?`
-    ).all(terms, agentId, limit) as Memory[]
+    ).all(terms, agentId, ...catParam, limit) as Memory[]
   } catch {
+    const catClauseF = category ? ' AND category = ?' : ''
     return db.prepare(
-      "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?"
-    ).all(agentId, `%${query}%`, `%${query}%`, limit) as Memory[]
+      `SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared')${catClauseF} AND (content LIKE ? OR keywords LIKE ?) ORDER BY accessed_at DESC LIMIT ?`
+    ).all(agentId, ...catParam, `%${query}%`, `%${query}%`, limit) as Memory[]
   }
 }
 

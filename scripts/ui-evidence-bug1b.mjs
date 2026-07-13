@@ -1,22 +1,40 @@
-// BUG1(b) live-evidence harness (Yoda-mandated). Starts ONLY the HTTP server
-// against the REAL worktree checkout, whose branch (nano/bug1b-...) is NOT on
-// origin -- exactly the divergent-fork state. Proves:
+// BUG1(b) live-evidence harness (Yoda-mandated). Drives the REAL worktree
+// checkout, whose branch (nano/bug1b-...) is NOT on origin -- exactly the
+// divergent-fork state. Proves:
 //   (a) POST /api/updates/apply returns a clean 409 with reason
 //       'branch-not-on-origin' (short-circuits BEFORE update.sh is ever spawned
 //       -- preflight fails, so nothing is pulled/built), and
 //   (b) the dashboard shows the honest, fork-aware error toast (screenshot).
 //
+// SAFETY (Yoda F-2): WEB_ONLY=true is MANDATORY. startWebServer otherwise boots
+// the full background constellation -- schedule runner, message router, channel
+// monitors, auto-restart runner -- and TWO tmux paths: the worker pre-start
+// (tmux new-session detached `claude --dangerously-skip-permissions`) and the
+// schedule runner, whose first tick reads task definitions from the REAL
+// ~/.claude/scheduled-tasks (file-based, not this in-memory DB) with a 30-minute
+// catch-up window and would inject tasks into LIVE tmux sessions. Earlier runs
+// only escaped because the script exited before the 60s first tick; that is luck,
+// not safety. WEB_ONLY disables all of it (web.ts honours it for exactly this
+// "staging preview must not conflict with the live fleet" case).
+//
 // Run from the worktree root AFTER `npm run build`:  node scripts/ui-evidence-bug1b.mjs
+process.env.WEB_ONLY = 'true'            // <-- disables schedulers/monitors/tmux (Yoda F-2)
 process.env.DASHBOARD_TOKEN = 'ui-evidence-bug1b-token'
 process.env.NODE_ENV = 'test'
 
-const OUT = process.env.SHOT_DIR || '/tmp'
-const PORT = 3522
-const TOKEN = process.env.DASHBOARD_TOKEN
-
 const { initDatabase } = await import('../dist/db.js')
 const { startWebServer } = await import('../dist/web.js')
+const { PROJECT_ROOT } = await import('../dist/config.js')
 const { chromium } = await import('@playwright/test')
+const { mkdirSync } = await import('node:fs')
+const { join } = await import('node:path')
+
+// Durable screenshot location (Yoda F-2): /tmp gets reaped, leaving the evidence
+// unviewable. store/self-audit persists in the worktree the reviewer flips to.
+const OUT = process.env.SHOT_DIR || join(PROJECT_ROOT, 'store', 'self-audit')
+mkdirSync(OUT, { recursive: true })
+const PORT = 3522
+const TOKEN = process.env.DASHBOARD_TOKEN
 
 initDatabase(':memory:')
 const server = startWebServer(PORT)

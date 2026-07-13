@@ -4,17 +4,20 @@ import {
   checkNoConcurrentUpdate,
   classifyLockWriteError,
   type GitRunner,
+  type BranchOnOrigin,
   type PidfileRunner,
 } from '../update-preflight.js'
 
 // Helper: build a GitRunner from plain strings. Covers the common
 // "return this exact branch / status" fixtures without dragging in a
-// real git invocation.
-function makeGit(branch: string, porcelain = '', ahead = 0): GitRunner {
+// real git invocation. branchOnOrigin defaults to 'present' so the existing
+// fixtures keep exercising the on-origin happy path.
+function makeGit(branch: string, porcelain = '', ahead = 0, branchOnOrigin: BranchOnOrigin = 'present'): GitRunner {
   return {
     currentBranch: () => branch,
     porcelainStatus: () => porcelain,
     aheadCount: () => ahead,
+    branchOnOrigin: () => branchOnOrigin,
   }
 }
 
@@ -107,6 +110,54 @@ describe('checkUpdatePreflight --branch agnostic', () => {
   })
 })
 
+describe('checkUpdatePreflight --branch not on origin (divergent fork)', () => {
+  it('blocks when ls-remote says the branch is definitively absent', () => {
+    // The live scenario: a fork branch never pushed to origin, ahead=0 because
+    // it has no upstream, so the old preflight passed and update.sh died.
+    const result = checkUpdatePreflight(makeGit('fix/embed-model-bge-m3', '', 0, 'absent'))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('branch-not-on-origin')
+    expect(result.message).toMatch(/DIVERGENT FORK/)
+    expect(result.message).toMatch(/fleet-update-watch/)
+    expect(result.message).toContain('fix/embed-model-bge-m3')
+  })
+
+  it('is fail-open: an unknown (network/auth/timeout) probe does NOT block', () => {
+    // A flaky network must never fabricate a false "branch missing"; update.sh
+    // stays the final enforcing layer.
+    expect(checkUpdatePreflight(makeGit('main', '', 0, 'unknown')).ok).toBe(true)
+  })
+
+  it('passes when the branch is present on origin', () => {
+    expect(checkUpdatePreflight(makeGit('develop', '', 0, 'present')).ok).toBe(true)
+  })
+
+  it('detached-HEAD takes precedence over the origin probe (probe not consulted)', () => {
+    const result = checkUpdatePreflight(makeGit('HEAD', '', 0, 'absent'))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('detached-head')
+  })
+
+  it('branch-not-on-origin takes precedence over dirty-tree and local-commits', () => {
+    // The structural cause (fork not on origin) is the actionable one; a stash
+    // or a diverged-history note would both be misleading here.
+    const result = checkUpdatePreflight(makeGit('forkbranch', ' M src/x.ts\n', 5, 'absent'))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toBe('branch-not-on-origin')
+  })
+
+  it('carries the branch on the rejection (frontend renders a localized detail from it)', () => {
+    const result = checkUpdatePreflight(makeGit('forkbranch', '', 0, 'absent'))
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    if (result.reason !== 'branch-not-on-origin') return
+    expect(result.branch).toBe('forkbranch')
+  })
+})
+
 describe('checkUpdatePreflight --dirty working tree', () => {
   it('rejects unstaged modifications', () => {
     const result = checkUpdatePreflight(makeGit('main', ' M src/web.ts\n'))
@@ -142,9 +193,10 @@ describe('checkUpdatePreflight --dirty working tree', () => {
 })
 
 describe('checkUpdatePreflight -- result shape', () => {
-  it('never emits a branch field on any path', () => {
-    // No result carries a branch field anymore; the update is
-    // branch-agnostic, so the branch name is never part of a rejection.
+  it('emits a branch field ONLY on branch-not-on-origin, never on the other paths', () => {
+    // The branch name is part of a rejection ONLY for the divergent-fork case
+    // (branch-not-on-origin), where the frontend renders a localized detail from
+    // it. Every other path stays branch-free.
     const ok = checkUpdatePreflight(makeGit('main'))
     expect(Object.hasOwn(ok, 'branch')).toBe(false)
 

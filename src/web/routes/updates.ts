@@ -221,6 +221,22 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
           return Number.isFinite(n) ? n : 0
         } catch { return 0 }
       },
+      // Network probe (5s cap). ls-remote --exit-code exits 0 when the branch
+      // is found on origin, 2 when it is definitively absent, and 128 (or times
+      // out with no status) on a connection/auth failure. Map anything that is
+      // not a clean 0/2 to 'unknown' so a flaky network never fakes 'absent'.
+      branchOnOrigin: (branch: string) => {
+        try {
+          execFileSync(
+            '/usr/bin/git',
+            ['ls-remote', '--exit-code', '--heads', 'origin', branch],
+            { cwd: PROJECT_ROOT, timeout: 5000, encoding: 'utf-8', stdio: 'pipe' },
+          )
+          return 'present'
+        } catch (err) {
+          return (err as { status?: number | null }).status === 2 ? 'absent' : 'unknown'
+        }
+      },
     }
     let preflight
     try {
@@ -245,6 +261,9 @@ export async function tryHandleUpdates(ctx: RouteContext): Promise<boolean> {
           error: preflight.message,
           reason: preflight.reason,
         }
+        // branch-not-on-origin carries the branch so the frontend can render a
+        // SHORT localized toast + a localized detail panel (not the raw message).
+        if (preflight.reason === 'branch-not-on-origin') body.branch = preflight.branch
         json(res, body, 409)
         return true
       }

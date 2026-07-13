@@ -10120,9 +10120,18 @@ async function runUpdate(autoStash) {
         }
         return
       }
+      // Divergent fork: the backend message is a long English paragraph that
+      // clips the toast. Show a SHORT localized toast and render the full
+      // localized explanation into the fork-notice panel below (F-1).
+      if (data.reason === 'branch-not-on-origin') {
+        showToast(t('updates.toast.fork_short'))
+        renderForkNotice(data.branch)
+        return
+      }
       showToast(t('updates.toast.not_started', { msg: data.error || ('HTTP ' + res.status) }))
       return
     }
+    hideForkNotice()
     showToast(t('updates.toast.applying'))
     // Poll the real outcome instead of a blind timed reload. update.sh (and its
     // detached finalizer) write store/update.last-result on exit, so we surface
@@ -10133,6 +10142,24 @@ async function runUpdate(autoStash) {
     resetBtn()
     showToast(t('updates.toast.error', {msg: err.message || err}))
   }
+}
+
+// Divergent-fork detail panel (F-1). The apply endpoint returns a short reason
+// ('branch-not-on-origin') + the branch; the toast stays short and the full,
+// localized explanation lives here so nothing is clipped. escapeHtmlUpdates keeps
+// the interpolated branch name inert.
+function renderForkNotice(branch) {
+  const box = document.getElementById('updatesForkNotice')
+  if (!box) return
+  box.hidden = false
+  box.className = 'updates-diagnose'
+  box.innerHTML = `<strong>${escapeHtmlUpdates(t('updates.fork.title'))}</strong>`
+    + `<p>${escapeHtmlUpdates(t('updates.fork.detail', { branch: branch || '?' }))}</p>`
+}
+
+function hideForkNotice() {
+  const box = document.getElementById('updatesForkNotice')
+  if (box) { box.hidden = true; box.innerHTML = '' }
 }
 
 // Poll /api/updates/status until the run finishes (pidfile gone AND a fresh

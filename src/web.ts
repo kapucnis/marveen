@@ -391,7 +391,10 @@ export function startWebServer(port = 3420): http.Server {
     const stalePatched: string[] = []
     // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
     // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
-    for (const agentName of [MAIN_AGENT_ID, ...listAgentNames()]) {
+    // Skipped under WEB_ONLY: this writes real agent settings.json, which a
+    // staging preview / evidence harness must not do (a fresh machine or CI run
+    // would seed live config from an "isolated" instance -- Yoda F-2 follow-up).
+    for (const agentName of webOnly ? [] : [MAIN_AGENT_ID, ...listAgentNames()]) {
       if (ensureAgentHooks(agentName)) patched.push(agentName)
       if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
     }
@@ -401,9 +404,15 @@ export function startWebServer(port = 3420): http.Server {
     logger.warn({ err }, 'Agent hook backfill skipped')
   }
 
+  // Skipped under WEB_ONLY: this copies default task-config files into the REAL
+  // ~/.claude/scheduled-tasks. A staging preview / evidence harness must not seed
+  // live fleet tasks (idempotent on a provisioned box, but a real write on a fresh
+  // machine or CI) -- Yoda F-2 follow-up.
   try {
-    ensureDefaultScheduledTasks()
-    logger.info('Default scheduled tasks seeded')
+    if (!webOnly) {
+      ensureDefaultScheduledTasks()
+      logger.info('Default scheduled tasks seeded')
+    }
   } catch (err) {
     logger.warn({ err }, 'Scheduled tasks seed skipped')
   }

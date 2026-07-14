@@ -11581,8 +11581,16 @@ function tuGetColor(agent) {
 function tuMcpServerFromTool(toolName) {
   if (!toolName || !toolName.startsWith('mcp__')) return null
   const parts = toolName.split('__')
-  // parts: ['mcp', '<server>', '<tool>'] -- server may contain single underscores
-  return parts.length >= 3 ? parts[1] : null
+  // parts: ['mcp', '<server>', '<tool>'] for a full tool name, or
+  // ['mcp', '<server>'] for a tuMcpGroupKey() group key -- without accepting
+  // the 2-part form, every grouped MCP row would be mislabelled as builtin.
+  return parts.length >= 2 && parts[1] ? parts[1] : null
+}
+
+function tuMcpGroupKey(toolName) {
+  if (!toolName || !toolName.startsWith('mcp__')) return toolName
+  const parts = toolName.split('__')
+  return parts.length >= 3 ? 'mcp__' + parts[1] : toolName
 }
 
 function tuFormatTokens(n) {
@@ -12385,13 +12393,14 @@ function renderTuToolStats(data) {
     return
   }
 
-  // Aggregate per-model rows into one entry per tool_name
+  // Aggregate per-model rows into one entry per tool (MCP tools grouped by server)
   const byTool = new Map()
   for (const row of data) {
-    let entry = byTool.get(row.tool_name)
+    const key = tuMcpGroupKey(row.tool_name)
+    let entry = byTool.get(key)
     if (!entry) {
-      entry = { tool_name: row.tool_name, count: 0, agentSet: new Set(), costUSD: 0 }
-      byTool.set(row.tool_name, entry)
+      entry = { tool_name: key, count: 0, agentSet: new Set(), costUSD: 0 }
+      byTool.set(key, entry)
     }
     entry.count += row.count || 0
     ;(row.agents || '').split(',').forEach(a => { const s = a.trim(); if (s) entry.agentSet.add(s) })

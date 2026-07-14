@@ -52,6 +52,7 @@ import { tryHandleOnboarding } from './web/routes/onboarding.js'
 import { tryHandleStatus } from './web/routes/status.js'
 import { tryHandleAutonomy } from './web/routes/autonomy.js'
 import { tryHandleTokenUsage } from './web/routes/token-usage.js'
+import { tryHandleCosts, startCostsSyncTask } from './web/routes/costs.js'
 import { tryHandleIdeas } from './web/routes/ideas.js'
 import { tryHandleToolLog } from './web/routes/tool-log.js'
 import { tryHandleSettings } from './web/routes/settings.js'
@@ -183,6 +184,7 @@ export function startWebServer(port = 3420): http.Server {
       if (await tryHandleStatus(routeCtx)) return
       if (await tryHandleAutonomy(routeCtx)) return
       if (await tryHandleTokenUsage(routeCtx)) return
+      if (await tryHandleCosts(routeCtx)) return
       if (await tryHandleIdeas(routeCtx)) return
       if (await tryHandleToolLog(routeCtx)) return
       if (await tryHandleSettings(routeCtx)) return
@@ -338,6 +340,12 @@ export function startWebServer(port = 3420): http.Server {
   const channelHealthInterval = webOnly ? undefined : startChannelHealthMonitor()
   if (!webOnly) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
 
+  // CostOps: reflect the local config's fixed costs into the ledger once at boot + every
+  // 10 minutes. Deliberately NOT done inside the GET /api/costs/summary handler -- a read
+  // endpoint must not write (was flagged in review); this is the one place that does.
+  const costsSyncInterval = webOnly ? undefined : startCostsSyncTask()
+  if (!webOnly) logger.info('CostOps fixed-cost sync started (10min poll + startup)')
+
   const stuckInputInterval = webOnly ? undefined : startStuckInputWatcher()
   if (!webOnly) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
@@ -465,6 +473,7 @@ export function startWebServer(port = 3420): http.Server {
     clearInterval(scheduleInterval)
     if (pluginMonitorInterval) clearInterval(pluginMonitorInterval)
     clearInterval(channelHealthInterval)
+    if (costsSyncInterval) clearInterval(costsSyncInterval)
     clearInterval(stuckInputInterval)
     clearInterval(stuckToolCallInterval)
     if (reauthHealerInterval) clearInterval(reauthHealerInterval)

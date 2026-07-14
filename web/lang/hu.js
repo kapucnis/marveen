@@ -89,6 +89,7 @@ window._i18n.hu = {
   'nav.tokenUsage':   'Token Monitor',
   'nav.ideas':        'Ötletláda',
   'nav.updates':      'Frissítések',
+  'nav.costs':        'Költségek',
 
   // --- Overview ---
   'overview.card.team_meta':     'élő állapot',
@@ -804,6 +805,23 @@ window._i18n.hu = {
   'network.result.not_private':  'Csak privát (helyi hálózati) IP-cím ellenőrizhető.',
   'network.result.empty':        'Adj meg egy IP-címet.',
   'network.result.error':        'Az ellenőrzés nem sikerült.',
+  // --- Costs (CostOps v0.1, PR #524) ---
+  'costs.page_title':            'Költségek',
+  'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',
+  'costs.loading':               'Betöltés...',
+  'costs.load_failed':           'Nem sikerült betölteni a költség-összefoglalót.',
+  'costs.no_config':             'Nincs helyi költség-konfiguráció -- a számok üresek, amíg nem kerül beállításra.',
+  'costs.current_spend':         'Havi eddigi költség',
+  'costs.forecast':              'Hónap végi előrejelzés',
+  'costs.month':                 'Időszak',
+  'costs.budget_title':          'Büdzsé',
+  'costs.budget_used':           'Felhasználva',
+  'costs.no_sources':            'Nincs aktív költségforrás.',
+  'costs.source_name':           'Forrás',
+  'costs.source_provider':       'Szolgáltató',
+  'costs.source_spend':          'Költség',
+  'costs.token_usage_note':      'Token-felhasználás mennyisége (nincs árazva)',
+  'costs.calls':                 'hívás',
 
   'tokenUsage.col.time':         'Idő',
   'tokenUsage.col.agent':        'Ágens',

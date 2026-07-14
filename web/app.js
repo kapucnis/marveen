@@ -287,6 +287,7 @@ function switchPage(pageId) {
   if (pageId === 'team') { loadTeamGraph() }
   if (pageId === 'messages') loadMessagesPage()
   if (pageId === 'tokenUsage') loadTokenUsage()
+  if (pageId === 'costs') loadCosts()
   if (pageId === 'ideas') loadIdeasPage()
   if (pageId === 'archived') loadArchivedPage()
   if (pageId === 'naplo') loadNaplo()
@@ -332,7 +333,7 @@ const NAV_I18N = {
   skills: 'nav.skills', connectors: 'nav.connectors', migrate: 'nav.migrate',
   docs: 'nav.docs', status: 'nav.status', network: 'nav.network', autonomy: 'nav.autonomy',
   settings: 'nav.settings', vault: 'nav.vault', tokenUsage: 'nav.tokenUsage',
-  ideas: 'nav.ideas', updates: 'nav.updates',
+  ideas: 'nav.ideas', updates: 'nav.updates', costs: 'nav.costs',
 }
 
 function renderNav() {
@@ -375,6 +376,7 @@ const PAGE_HEADER_I18N = {
   tokenUsagePage: { title: 'tokenUsage.page_title',  sub: 'tokenUsage.page_subtitle' },
   updatesPage:    { title: 'updates.page_title',     sub: null },
   naploPage:      { title: 'naplo.page_title',       sub: 'naplo.page_subtitle' },
+  costsPage:      { title: 'costs.page_title',       sub: 'costs.page_subtitle' },
 }
 
 function renderStaticI18n() {
@@ -8956,6 +8958,68 @@ async function runCameraCheck() {
     if (e.key === 'Enter') { e.preventDefault(); runCameraCheck() }
   })
 })()
+
+// ============================================================
+// === CostOps (v0.1, PR #524): local cost ledger summary ===
+// ============================================================
+
+document.getElementById('refreshCostsBtn').addEventListener('click', loadCosts)
+
+async function loadCosts() {
+  const el = document.getElementById('costsContent')
+  const mutedStyle = 'color:var(--text-muted);font-size:13px'
+  el.innerHTML = `<div style="${mutedStyle}">${t('costs.loading')}</div>`
+  try {
+    const res = await fetch('/api/costs/summary')
+    const s = await res.json()
+    if (!res.ok) throw new Error(s?.error || 'request failed')
+
+    const fmtMoney = (n) => (typeof n === 'number' ? n.toLocaleString('hu-HU') : '—') + ' ' + escapeHtml(s.currency || '')
+
+    let html = ''
+
+    if (!s.config_present) {
+      html += `<div style="${mutedStyle};margin-bottom:12px">${t('costs.no_config')}</div>`
+    }
+
+    html += `<div class="overview-stats">
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.current_spend)}</div><div class="overview-stat-label">${t('costs.current_spend')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${fmtMoney(s.forecast_month_end)}</div><div class="overview-stat-label">${t('costs.forecast')}</div></div>
+      <div class="overview-stat"><div class="overview-stat-value">${escapeHtml(s.month || '—')}</div><div class="overview-stat-label">${t('costs.month')}</div></div>
+    </div>`
+
+    if (s.budget) {
+      const pct = Math.round((s.budget.used_pct || 0) * 100)
+      const color = s.budget.status === 'hard' ? 'var(--danger,#e74c3c)' : s.budget.status === 'warning' ? 'var(--warn,#e0a800)' : 'var(--text-muted)'
+      html += `<div style="margin-top:16px;padding:12px 16px;border:1px solid var(--border,#333);border-radius:8px">
+        <div style="font-weight:600;margin-bottom:6px">${t('costs.budget_title')}: ${escapeHtml(s.budget.id)} (${fmtMoney(s.budget.amount)})</div>
+        <div style="${mutedStyle}">${t('costs.budget_used')}: <strong style="color:${color}">${pct}%</strong></div>
+      </div>`
+    }
+
+    const sources = Array.isArray(s.all_sources) ? s.all_sources : []
+    if (sources.length === 0) {
+      html += `<div style="${mutedStyle};margin-top:12px">${t('costs.no_sources')}</div>`
+    } else {
+      html += `<div style="overflow-x:auto;margin-top:16px"><table style="width:100%;border-collapse:collapse">
+        <thead><tr style="text-align:left;border-bottom:1px solid var(--border,#333)">
+          <th style="padding:6px 8px">${t('costs.source_name')}</th><th style="padding:6px 8px">${t('costs.source_provider')}</th><th style="padding:6px 8px">${t('costs.source_spend')}</th>
+        </tr></thead>
+        <tbody>${sources.map((src) => `<tr style="border-bottom:1px solid var(--border,#222)">
+          <td style="padding:6px 8px">${escapeHtml(src.name)}</td>
+          <td style="padding:6px 8px;${mutedStyle}">${escapeHtml(src.provider)}</td>
+          <td style="padding:6px 8px">${fmtMoney(src.spend)}</td>
+        </tr>`).join('')}</tbody>
+      </table></div>`
+    }
+
+    html += `<p style="${mutedStyle};margin-top:16px">${t('costs.token_usage_note')} (${(s.token_usage?.calls ?? 0)} ${t('costs.calls')}, ${(s.token_usage?.input_tokens ?? 0) + (s.token_usage?.output_tokens ?? 0)} tokens)</p>`
+
+    el.innerHTML = html
+  } catch (err) {
+    el.innerHTML = `<div style="${mutedStyle}">${t('costs.load_failed')}</div>`
+  }
+}
 
 // ============================================================
 // === Memory Import ===

@@ -567,11 +567,18 @@ def run(dry):
         for i, (mb, mail, reason) in enumerate(to_model):
             v = verdicts.get(i)
             domain = domain_of((mail.get('from') or '').lower())
-            is_spam = bool(v and v['verdict'] == 'spam' and v['confidence'] >= model_cfg['conf_threshold'])
-            if is_spam and model_cfg['shadow']:
+            conf_ok = bool(v and v['confidence'] >= model_cfg['conf_threshold'])
+            is_spam = bool(v and v['verdict'] == 'spam' and conf_ok)
+            # noise = legitimate but attention-free (Yoda spec msg 772). Drops like
+            # spam, but NEVER teaches the auto-blocklist and has no daily cap (the
+            # cap guards blocklist growth, which noise never triggers).
+            is_noise = bool(v and v['verdict'] == 'noise' and conf_ok)
+            if (is_spam or is_noise) and model_cfg['shadow']:
                 # Shadow/burn-in: log what we WOULD drop, but still PING and do
-                # not touch the blocklist -- observe the model with zero effect.
-                tag = f"{reason}->SHADOW-would-drop(spam {v['confidence']:.2f})"
+                # not touch the blocklist -- observe the model with zero effect. The
+                # verdict type (spam vs noise) stays in the tag so the safety-net can
+                # tell a would-noise-drop from a would-spam-drop.
+                tag = f"{reason}->SHADOW-would-drop({v['verdict']} {v['confidence']:.2f})"
                 survivors.append((mb, mail, tag))
                 audit_lines.append(
                     f'{mail["received"]} [{mb}] PING {tag} | {mail.get("from")} | {(mail.get("subject") or "")[:70]}')
@@ -592,8 +599,15 @@ def run(dry):
                 if added:
                     added_today += 1
                     new_blocklisted.append((domain, v, mail))
+            elif is_noise:
+                # Live: legitimate-but-noise -> DROP, but NEVER touch the blocklist
+                # (K-2 / Yoda spec: repeated noise patterns go to the step-3 rule-
+                # candidate human review, msg 770, not an auto-list). The daily
+                # safety-net's `grep ' DROP '` still surfaces it within 24h.
+                audit_lines.append(
+                    f"{mail['received']} [{mb}] DROP {reason}->model-noise({v['confidence']:.2f}) | {mail.get('from')} | {(mail.get('subject') or '')[:70]}")
             else:
-                # legit / unsure / low-confidence / model failure -> PING (fail-safe).
+                # important / unsure / low-confidence / model failure -> PING (fail-safe).
                 # F-3: distinguish the deliberate dry-run skip from a real failure.
                 if dry:
                     tag = 'model-skipped(dry-run)'

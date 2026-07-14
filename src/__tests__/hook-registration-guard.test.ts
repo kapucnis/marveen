@@ -218,6 +218,43 @@ describe('pruneStaleHookEntries', () => {
     expect(KNOWN_HOOK_SCRIPTS).toContain('taskstate-replay.py')
     expect(KNOWN_HOOK_SCRIPTS).toContain('staleness-guard.py')
   })
+
+  // R1 (EliteAI hard requirement): the self-heal must NEVER prune our fleet's own
+  // PreToolUse guard wirings. They are NOT in KNOWN_HOOK_SCRIPTS and never live
+  // under .claude/worktrees/, so the prune treats them as FOREIGN and preserves
+  // them -- proven here against the harshest input (fileExists() -> false for
+  // everything, as if all guard files were missing). If a future edit ever added
+  // a guard name to KNOWN_HOOK_SCRIPTS, this test fails, catching the regression
+  // before a guard could be silently unwired.
+  it('R1: never prunes fleet-guard hook wirings even when their files appear missing', () => {
+    const guardCommands = [
+      'node /home/kapucnis/marveen/scripts/hooks/eliteai-guard.mjs',
+      'node /home/kapucnis/marveen/scripts/hooks/skill-write-guard.mjs',
+      'node /home/kapucnis/marveen/scripts/hooks/destructive-op-guard.mjs',
+      'node /home/kapucnis/marveen/scripts/hooks/nano-worktree-guard.mjs',
+      'node /home/kapucnis/marveen/scripts/hooks/yoda-write-guard.mjs',
+      'node /home/kapucnis/marveen/scripts/hooks/claude-constitution-guard.mjs',
+    ]
+    const settings = {
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Bash|Edit|Write|Read', hooks: guardCommands.map((command) => ({ type: 'command', command })) },
+        ],
+      },
+    }
+    const before = JSON.stringify(settings)
+    // fileExists() -> false for EVERYTHING: even if every guard file were gone,
+    // the entries must survive because they are not recognised as prunable.
+    const { changed, removed } = pruneStaleHookEntries(settings, { fileExists: () => false })
+    expect(changed).toBe(false)
+    expect(removed).toEqual([])
+    // And none of our guard names leaked into the prunable set.
+    for (const cmd of guardCommands) {
+      const base = cmd.slice(cmd.lastIndexOf('/') + 1)
+      expect(KNOWN_HOOK_SCRIPTS).not.toContain(base)
+    }
+    expect(JSON.stringify(settings)).toBe(before) // byte-identical, nothing touched
+  })
 })
 
 describe('pruneStaleHooksFromSettingsFile', () => {

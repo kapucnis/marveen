@@ -8,7 +8,8 @@ import { isBlockedCrossOriginWrite, originMatchesServedHost } from './web/csrf-o
 import { json } from './web/http-helpers.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
-import { ensureAgentHooks, ensureAgentStalenessHook, ensureDefaultScheduledTasks } from './web/agent-scaffold.js'
+import { ensureAgentHooks, ensureAgentStalenessHook, ensureDefaultScheduledTasks, agentSettingsPath } from './web/agent-scaffold.js'
+import { shouldRegisterHooks, pruneStaleHooksFromSettingsFile } from './web/hook-registration-guard.js'
 import { refreshMarveenBotUsername } from './web/telegram.js'
 import { startMessageRouter } from './web/message-router.js'
 import { startUpdateChecker } from './web/update-checker.js'
@@ -390,22 +391,44 @@ export function startWebServer(port = 3420): http.Server {
   // Backfill the PreCompact hook into existing agents' settings.json so the
   // auto-skill / auto-memory flow runs on context compaction. No-op if the
   // agent already has its own hooks block.
-  try {
-    const patched: string[] = []
-    const stalePatched: string[] = []
-    // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
-    // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
-    // Skipped under WEB_ONLY: this writes real agent settings.json, which a
-    // staging preview / evidence harness must not do (a fresh machine or CI run
-    // would seed live config from an "isolated" instance -- Yoda F-2 follow-up).
-    for (const agentName of webOnly ? [] : [MAIN_AGENT_ID, ...listAgentNames()]) {
-      if (ensureAgentHooks(agentName)) patched.push(agentName)
-      if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
+  //
+  // Guarded by TWO independent gates, each logging its own skip reason so the
+  // startup log shows which one fired (audit readability, EliteAI M1):
+  //   1. WEB_ONLY staging instance -- must never write real agent settings.json;
+  //      a fresh machine / CI run would seed live config from an "isolated"
+  //      instance (Yoda F-2 follow-up).
+  //   2. worktree / temp-dir checkout -- PROJECT_ROOT is temporary; baking its
+  //      absolute paths into user-global ~/.claude/settings.json leaves stale
+  //      exit-2 hooks that deafen the main agent once the checkout is deleted
+  //      (2026-07-11 incident, upstream #565/#599).
+  if (webOnly) {
+    logger.info('Hook registration skipped (WEB_ONLY staging instance)')
+  } else {
+    const hookDecision = shouldRegisterHooks({ projectRoot: PROJECT_ROOT, webOnly })
+    if (!hookDecision.register) {
+      logger.info({ reason: hookDecision.reason, projectRoot: PROJECT_ROOT }, 'Hook registration skipped (worktree/temp instance)')
+    } else {
+      try {
+        const patched: string[] = []
+        const stalePatched: string[] = []
+        const pruned: string[] = []
+        // Include the main agent (MAIN_AGENT_ID) so the voice hook is also seeded
+        // into ~/.claude/settings.json alongside existing hooks (e.g. telegram_progress.py).
+        for (const agentName of [MAIN_AGENT_ID, ...listAgentNames()]) {
+          // Self-heal FIRST: drop entries this app previously wrote whose script
+          // file no longer exists (e.g. a deleted worktree instance's paths), so
+          // the re-registration below lands on a clean, unblocked settings file.
+          pruned.push(...pruneStaleHooksFromSettingsFile(agentSettingsPath(agentName)))
+          if (ensureAgentHooks(agentName)) patched.push(agentName)
+          if (ensureAgentStalenessHook(agentName)) stalePatched.push(agentName)
+        }
+        if (pruned.length) logger.info({ pruned }, 'Stale hook entries pruned from agent settings.json')
+        if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
+        if (stalePatched.length) logger.info({ patched: stalePatched }, 'staleness-guard UserPromptSubmit hook backfilled into agent settings.json')
+      } catch (err) {
+        logger.warn({ err }, 'Agent hook backfill skipped')
+      }
     }
-    if (patched.length) logger.info({ patched }, 'PreCompact hook backfilled into agent settings.json')
-    if (stalePatched.length) logger.info({ patched: stalePatched }, 'staleness-guard UserPromptSubmit hook backfilled into agent settings.json')
-  } catch (err) {
-    logger.warn({ err }, 'Agent hook backfill skipped')
   }
 
   // Skipped under WEB_ONLY: this copies default task-config files into the REAL

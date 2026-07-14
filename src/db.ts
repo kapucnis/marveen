@@ -799,21 +799,75 @@ export function buildFtsMatchExpression(query: string): string {
   return tokens.join(' ')
 }
 
+// -- Recency-weighted retrieval (Roitman 17.4.2) --
+//
+// score = λ·relevance + (1−λ)·recency, where recency = exp(−age/τ). Pure
+// keyword rank returns whichever memory FTS scores highest regardless of age,
+// so a stale fact ("reply tool down") can outrank its own correction ("reply
+// tool up"). The blend keeps relevance dominant (λ = 0.7) but breaks
+// near-ties in favour of the newer memory.
+//
+// FTS5 `rank` is bm25: negative, more negative = better. Normalized to 0..1
+// via −rank/(1−rank) (monotonic, no unbounded tail). The blend runs in JS on
+// an oversampled candidate set rather than in SQL so it does not depend on
+// SQLite being compiled with math functions, and stays unit-testable.
+export const RECENCY_LAMBDA = 0.7
+export const RECENCY_TAU_SEC = 7 * 86400
+// Candidates fetched per requested row before re-ranking. Bounded so a broad
+// query still touches at most 4x the requested rows.
+const RECENCY_OVERSAMPLE = 4
+
+export interface RecencyRankable {
+  rank: number
+  created_at: number
+}
+
+export function recencyWeightedScore(
+  row: RecencyRankable,
+  nowSec: number,
+  lambda = RECENCY_LAMBDA,
+  tauSec = RECENCY_TAU_SEC,
+): number {
+  const relevance = row.rank < 0 ? -row.rank / (1 - row.rank) : 0
+  const ageSec = Math.max(0, nowSec - row.created_at)
+  const recency = Math.exp(-ageSec / tauSec)
+  return lambda * relevance + (1 - lambda) * recency
+}
+
+export function reRankByRecency<T extends RecencyRankable>(
+  rows: T[],
+  limit: number,
+  nowSec: number = Math.floor(Date.now() / 1000),
+): T[] {
+  return rows
+    .map((row) => ({ row, score: recencyWeightedScore(row, nowSec) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.row)
+}
+
+// Strip the FTS rank column the oversampled queries select for re-ranking, so
+// the public return shape stays exactly Memory.
+function withoutRank<T extends { rank: number }>(rows: T[]): Omit<T, 'rank'>[] {
+  return rows.map(({ rank: _rank, ...rest }) => rest)
+}
+
 export function searchMemories(query: string, chatId: string, limit = 3, category?: string): Memory[] {
   const terms = buildFtsMatchExpression(query)
   if (!terms) return []
   const catClause = category ? ' AND m.category = ?' : ''
   const catParam: string[] = category ? [category] : []
   try {
-    return db
+    const candidates = db
       .prepare(
-        `SELECT m.* FROM memories m
+        `SELECT m.*, f.rank AS rank FROM memories m
          JOIN memories_fts f ON m.id = f.rowid
          WHERE f.content MATCH ? AND m.chat_id = ?${catClause}
          ORDER BY rank
          LIMIT ?`
       )
-      .all(terms, chatId, ...catParam, limit) as Memory[]
+      .all(terms, chatId, ...catParam, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+    return withoutRank(reRankByRecency(candidates, limit)) as Memory[]
   } catch {
     return []
   }
@@ -918,12 +972,13 @@ export function searchAgentMemories(agentId: string, query: string, limit: numbe
   const catClause = category ? ' AND m.category = ?' : ''
   const catParam: string[] = category ? [category] : []
   try {
-    return db.prepare(
-      `SELECT m.* FROM memories m
+    const candidates = db.prepare(
+      `SELECT m.*, f.rank AS rank FROM memories m
        JOIN memories_fts f ON m.id = f.rowid
        WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared')${catClause}
        ORDER BY rank LIMIT ?`
-    ).all(terms, agentId, ...catParam, limit) as Memory[]
+    ).all(terms, agentId, ...catParam, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+    return withoutRank(reRankByRecency(candidates, limit)) as Memory[]
   } catch {
     const catClauseF = category ? ' AND category = ?' : ''
     return db.prepare(
@@ -1026,12 +1081,16 @@ export function recallSearch(query: string, agentId?: string, limit = 50): Recal
   const escaped = escapeLike(query)
   if (terms) {
     try {
+      // Was ORDER BY created_at DESC (pure recency, relevance ignored); now the
+      // same λ-blend as the other search paths, so a strongly matching older
+      // memory can still surface above barely-matching fresh noise.
       const sql = agentId
-        ? `SELECT m.* FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') ORDER BY m.created_at DESC LIMIT ?`
-        : `SELECT m.* FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? ORDER BY m.created_at DESC LIMIT ?`
-      memories = agentId
-        ? db.prepare(sql).all(terms, agentId, limit) as Memory[]
-        : db.prepare(sql).all(terms, limit) as Memory[]
+        ? `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? AND (m.agent_id = ? OR m.category = 'shared') ORDER BY rank LIMIT ?`
+        : `SELECT m.*, f.rank AS rank FROM memories m JOIN memories_fts f ON m.id = f.rowid WHERE f.memories_fts MATCH ? ORDER BY rank LIMIT ?`
+      const candidates = agentId
+        ? db.prepare(sql).all(terms, agentId, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+        : db.prepare(sql).all(terms, limit * RECENCY_OVERSAMPLE) as (Memory & { rank: number })[]
+      memories = withoutRank(reRankByRecency(candidates, limit)) as Memory[]
     } catch {
       const sql = agentId
         ? "SELECT * FROM memories WHERE (agent_id = ? OR category = 'shared') AND (content LIKE ? ESCAPE '\\' OR keywords LIKE ? ESCAPE '\\') ORDER BY created_at DESC LIMIT ?"

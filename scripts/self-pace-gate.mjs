@@ -92,10 +92,14 @@ const HTTP_WRITE_RX = /(-X\s*(POST|PUT|PATCH|DELETE)|--request\s+(POST|PUT|PATCH
 // KNOWN LIMITATIONS (accepted, defense-in-depth -- the runtime tool-deny is the
 // primary guard, this Bash hook is a second layer; a sub-agent is not adversarial
 // to its own gate, it just must not casually self-pace):
-//   - Not quote-aware: a separator INSIDE quotes (e.g. a commit message
-//     `git commit -m "fix; crontab -r"`) splits and could false-deny. Rare
-//     enough (the quoted ; must be immediately followed by a blocked binary at a
-//     segment start) that a full shell-tokenizer is not warranted here.
+//   - Not fully quote-aware: a separator INSIDE quotes could in principle split
+//     and false-deny. The common case -- a git commit/tag/stash MESSAGE (e.g.
+//     `git commit -m "fix; crontab -r"`) -- is now handled: stripGitCommitMessages
+//     blanks the literal message text before matching, so a trigger token inside a
+//     commit message no longer false-denies (a $()/backtick-substituting message is
+//     kept intact so a real substitution is still gated). A quoted separator OUTSIDE
+//     a commit message stays rare enough that a full shell-tokenizer is not
+//     warranted here.
 //   - A $(...) or backtick substitution that assigns a scheduler result
 //     (`X=$(crontab -)`, `X=`crontab -``) is caught by SCHEDULER_RX's boundary
 //     anchor, which now includes both `(` and the backtick.
@@ -142,6 +146,29 @@ export function stripDataPayloads(seg) {
   )
 }
 
+// Blank out git commit/tag/stash -m/--message LITERAL text before self-pace
+// matching. A commit message is prose, NEVER a shell invocation, so a trigger
+// token that only appears INSIDE the message must not false-deny (2026-07-13,
+// DrCode: a long `git commit -m "...batch...; at..."` blocked twice, the short
+// one passed -- the message text was split as shell segments). Same principle
+// and same literal-only quote handling as stripDataPayloads: single-quoted,
+// ANSI-C $'...', and double-quoted WITHOUT $(...)/backtick are blanked; a
+// double-quoted message that CAN command-substitute (`git commit -m "$(crontab
+// -r)"`) is left intact so SCHEDULER_RX still catches the real substitution.
+// Scoped to git commit/tag/stash so a `-m` on an unrelated binary is untouched.
+export function stripGitCommitMessages(command) {
+  const cmd = String(command ?? '')
+  if (!/\bgit\b[\s\S]*\b(commit|tag|stash)\b/i.test(cmd)) return cmd
+  return cmd.replace(
+    /((?:^|\s)(?:-m|--message)(?:\s+|=))('[^']*'|\$'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")/gi,
+    (full, flag, arg) => {
+      const dq = arg.startsWith('"')
+      if (dq && (arg.includes('$(') || arg.includes('`'))) return full // may substitute -> keep
+      return flag + (dq ? '""' : "''") // literal message -> blank the content
+    },
+  )
+}
+
 // Pure decision: does this tool call set up self-pace / self-injection?
 export function gateDecision(toolName, toolInput) {
   const name = String(toolName ?? '')
@@ -159,7 +186,7 @@ export function gateDecision(toolName, toolInput) {
     // it), so the URL/method args still match but the body text never does. A
     // separator OUTSIDE the payload still splits, so `curl -d '' x ; crontab -r`
     // is still caught.
-    const safeCommand = stripDataPayloads(String(toolInput?.command ?? ''))
+    const safeCommand = stripDataPayloads(stripGitCommitMessages(String(toolInput?.command ?? '')))
     // Per-segment so an unrelated token elsewhere in a compound command cannot
     // turn a legit read (store inspection, schedule-API GET) into a false deny.
     for (const seg of splitSegments(safeCommand)) {

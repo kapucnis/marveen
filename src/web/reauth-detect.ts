@@ -63,15 +63,56 @@ function allOccurrencesQuoted(tail: string, rx: RegExp): boolean {
   return sawAny
 }
 
+// A 15-line tail is still too coarse for a *transcript* line that scrolls with
+// the conversation. Devy 2026-07-12: an agent that hit an expired token, then
+// ran /login and got "Login successful", still carried the older
+// "Not logged in - Please run /login" transcript result inside the tail window
+// -- and the dashboard badged a healthy, logged-in agent.
+//
+// Claude Code renders a *live status line* directly above the input box, and
+// that line -- not the scrolling transcript -- is what tracks auth state: it
+// reads "Not logged in - Run /login" while broken and flips to the context
+// readout once login succeeds. So when the pane has the box UI, scan only that
+// live region and ignore the transcript above it. Panes without the box (print
+// mode, plain captures, unit fixtures) keep the tail heuristic.
+const BOX_BORDER_RX = /─{10,}/
+
+/**
+ * The live status region: the status line + the input box + the hint lines
+ * under it. Returns null when the pane has no input box to anchor on.
+ */
+function liveStatusRegion(pane: string): string | null {
+  const lines = pane.split('\n')
+  const borders: number[] = []
+  for (let i = lines.length - 1; i >= 0 && borders.length < 2; i--) {
+    if (BOX_BORDER_RX.test(lines[i])) borders.push(i)
+  }
+  if (borders.length < 2) return null
+  const top = Math.min(borders[0], borders[1])
+  return lines.slice(Math.max(0, top - 1)).join('\n')
+}
+
 /**
  * Inspect a captured pane and decide whether the session needs re-auth.
  * Returns { needsReauth:false } for a null/empty pane (capture failed / not
- * running) -- absence of evidence is not evidence of an auth problem. Only the
- * last TAIL_LINES are scanned so scrollback that merely mentions the markers
- * does not trigger a false badge.
+ * running) -- absence of evidence is not evidence of an auth problem. Scans the
+ * live status region when the pane has Claude Code's input box, else falls back
+ * to the last TAIL_LINES, so scrollback that merely mentions the markers does
+ * not trigger a false badge.
  */
 export function detectReauthNeeded(pane: string | null | undefined): ReauthState {
   if (!pane) return { needsReauth: false }
+  const region = liveStatusRegion(pane)
+  if (region !== null) {
+    // PRIMARY: the pane has the box UI -> the live status line reflects the
+    // real, current auth state; a stale transcript marker above it is ignored.
+    for (const m of REAUTH_MARKERS) {
+      if (m.rx.test(region)) return { needsReauth: true, reason: m.reason }
+    }
+    return { needsReauth: false }
+  }
+  // FALLBACK (no box UI: print mode / plain captures / unit fixtures): the tail
+  // heuristic, kept together WITH our quoted/paren FP filter.
   const tail = tailOf(pane, TAIL_LINES)
   for (const m of REAUTH_MARKERS) {
     if (!m.rx.test(tail)) continue

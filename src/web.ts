@@ -1,6 +1,7 @@
 import http from 'node:http'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { execSync, execFileSync } from 'node:child_process'
 import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
 import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
@@ -400,11 +401,12 @@ export function startWebServer(port = 3420): http.Server {
   //   2. worktree / temp-dir checkout -- PROJECT_ROOT is temporary; baking its
   //      absolute paths into user-global ~/.claude/settings.json leaves stale
   //      exit-2 hooks that deafen the main agent once the checkout is deleted
-  //      (2026-07-11 incident, upstream #565/#599).
+  //      (2026-07-11 incident, upstream #565/#599). tmpDir feeds the temp-dir
+  //      clone detection added in #599.
   if (webOnly) {
     logger.info('Hook registration skipped (WEB_ONLY staging instance)')
   } else {
-    const hookDecision = shouldRegisterHooks({ projectRoot: PROJECT_ROOT, webOnly })
+    const hookDecision = shouldRegisterHooks({ projectRoot: PROJECT_ROOT, webOnly, tmpDir: tmpdir() })
     if (!hookDecision.register) {
       logger.info({ reason: hookDecision.reason, projectRoot: PROJECT_ROOT }, 'Hook registration skipped (worktree/temp instance)')
     } else {

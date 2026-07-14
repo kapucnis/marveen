@@ -4,8 +4,20 @@ import { gateDecision as selfPaceDecision, stripDataPayloads } from '../../scrip
 import {
   agentGetsGovernanceGates,
   injectSelfPaceGate,
+  agentGetsDestructiveOpGate,
+  injectDestructiveOpGate,
+  agentGetsConstitutionGuard,
+  injectConstitutionGuard,
+  agentGetsSkillWriteGuard,
+  injectSkillWriteGuard,
+  agentGetsYodaWriteGuard,
+  injectYodaWriteGuard,
+  agentGetsTaskstateStartupReplay,
+  injectTaskstateStartupReplay,
 } from '../web/agent-scaffold.js'
-import { MAIN_AGENT_ID } from '../config.js'
+import { MAIN_AGENT_ID, PROJECT_ROOT } from '../config.js'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 // --- self-pace-gate: blocks the agent from scheduling its own future turns ---
 describe('self-pace-gate gateDecision', () => {
@@ -231,5 +243,230 @@ describe('governance gate scaffold wiring', () => {
     // operator-confirmation-gate is intentionally NOT wired: merge/deploy is
     // operator-authorized autonomously; the self-decide vector is covered above.
     expect(pre.some((e) => JSON.stringify(e).includes('operator-confirmation-gate.mjs'))).toBe(false)
+  })
+})
+
+// --- destructive-op-guard scaffold wiring (2026-07-10 guard-unification):
+// same main-exempt + idempotent contract as the other gates. The gateDecision
+// LOGIC itself is covered exhaustively in destructive-op-guard.test.ts -- this
+// only proves the scaffold wires it correctly into a sub-agent's settings.json. ---
+describe('destructive-op-guard scaffold wiring', () => {
+  it('applies to sub-agents, exempts the main agent (main gets it via its own root settings.json -> eliteai-guard.mjs wrapper)', () => {
+    expect(agentGetsDestructiveOpGate('nano')).toBe(true)
+    expect(agentGetsDestructiveOpGate('muszaki')).toBe(true)
+    expect(agentGetsDestructiveOpGate('yoda')).toBe(true)
+    expect(agentGetsDestructiveOpGate(MAIN_AGENT_ID)).toBe(false)
+  })
+  it('injectDestructiveOpGate is idempotent (no duplicate on respawn)', () => {
+    const s: Record<string, unknown> = {}
+    injectDestructiveOpGate(s)
+    injectDestructiveOpGate(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.filter((e) => JSON.stringify(e).includes('destructive-op-guard.mjs')).length).toBe(1)
+  })
+  it('the hook matcher is Bash-only (the threat model requires execution, not a file write)', () => {
+    const s: Record<string, unknown> = {}
+    injectDestructiveOpGate(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as Array<{ matcher: string }>)
+    const entry = pre.find((e) => JSON.stringify(e).includes('destructive-op-guard.mjs'))
+    expect(entry!.matcher).toBe('Bash')
+  })
+  it('coexists with the other PreToolUse hooks (self-pace, email-send) without clobbering them', () => {
+    const s: Record<string, unknown> = {}
+    injectSelfPaceGate(s)
+    injectDestructiveOpGate(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('destructive-op-guard.mjs'))).toBe(true)
+    expect(pre.length).toBe(2)
+  })
+})
+
+// 2026-07-11: added after Yoda's fleet-behavior audit (nina/yoda had no
+// constitution-guard at all; muszaki/besanyi had a manually-copied one that
+// had already drifted, since nothing re-synced it on respawn).
+describe('constitution-guard scaffold wiring', () => {
+  it('applies to sub-agents, exempts the main agent', () => {
+    expect(agentGetsConstitutionGuard('nano')).toBe(true)
+    expect(agentGetsConstitutionGuard('nina')).toBe(true)
+    expect(agentGetsConstitutionGuard('yoda')).toBe(true)
+    expect(agentGetsConstitutionGuard(MAIN_AGENT_ID)).toBe(false)
+  })
+  it('injectConstitutionGuard is idempotent (no duplicate on respawn)', () => {
+    const s: Record<string, unknown> = {}
+    injectConstitutionGuard('nina', s)
+    injectConstitutionGuard('nina', s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.filter((e) => JSON.stringify(e).includes('claude-constitution-guard.mjs')).length).toBe(1)
+  })
+  it('the hook matcher covers Bash|Write|Edit|NotebookEdit (the threat model includes a direct file write)', () => {
+    const s: Record<string, unknown> = {}
+    injectConstitutionGuard('nina', s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as Array<{ matcher: string }>)
+    const entry = pre.find((e) => JSON.stringify(e).includes('claude-constitution-guard.mjs'))
+    expect(entry!.matcher).toBe('Bash|Write|Edit|NotebookEdit')
+  })
+  it('re-propagates the canonical guard file into the target agent\'s own hooks dir (self-healing against drift)', () => {
+    const s: Record<string, unknown> = {}
+    injectConstitutionGuard('nina', s)
+    const canonical = readFileSync(
+      join(PROJECT_ROOT, 'scripts', 'hooks', 'claude-constitution-guard.mjs'), 'utf-8')
+    const copied = readFileSync(
+      join(PROJECT_ROOT, 'agents', 'nina', '.claude', 'hooks', 'claude-constitution-guard.mjs'), 'utf-8')
+    expect(copied).toBe(canonical)
+  })
+  it('coexists with the other PreToolUse hooks without clobbering them', () => {
+    const s: Record<string, unknown> = {}
+    injectSelfPaceGate(s)
+    injectDestructiveOpGate(s)
+    injectConstitutionGuard('nina', s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('destructive-op-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('claude-constitution-guard.mjs'))).toBe(true)
+    expect(pre.length).toBe(3)
+  })
+})
+
+// 2026-07-11: K1 of the injection-defense package (Yoda spec msg_id:364,
+// built by Nano, adversarially re-verified by Yoda + GPT-crosscheck GO-with-
+// conditions). The gateDecision LOGIC itself is covered exhaustively in
+// skill-write-guard.test.ts -- this only proves the scaffold wires it
+// correctly into a sub-agent's settings.json.
+describe('skill-write-guard scaffold wiring', () => {
+  it('applies to sub-agents, exempts the main agent (main issues approval tokens out-of-band, so gating it would block the mechanism itself)', () => {
+    expect(agentGetsSkillWriteGuard('nano')).toBe(true)
+    expect(agentGetsSkillWriteGuard('nina')).toBe(true)
+    expect(agentGetsSkillWriteGuard('yoda')).toBe(true)
+    expect(agentGetsSkillWriteGuard(MAIN_AGENT_ID)).toBe(false)
+  })
+  it('injectSkillWriteGuard is idempotent (no duplicate on respawn)', () => {
+    const s: Record<string, unknown> = {}
+    injectSkillWriteGuard(s)
+    injectSkillWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.filter((e) => JSON.stringify(e).includes('skill-write-guard.mjs')).length).toBe(1)
+  })
+  it('the hook matcher covers Bash|Edit|Write|NotebookEdit (a Bash-only matcher would let a native Write call sail past unseen)', () => {
+    const s: Record<string, unknown> = {}
+    injectSkillWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as Array<{ matcher: string }>)
+    const entry = pre.find((e) => JSON.stringify(e).includes('skill-write-guard.mjs'))
+    expect(entry!.matcher).toBe('Bash|Edit|Write|NotebookEdit')
+  })
+  it('coexists with the other PreToolUse hooks without clobbering them', () => {
+    const s: Record<string, unknown> = {}
+    injectSelfPaceGate(s)
+    injectDestructiveOpGate(s)
+    injectConstitutionGuard('nina', s)
+    injectSkillWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('destructive-op-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('claude-constitution-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('skill-write-guard.mjs'))).toBe(true)
+    expect(pre.length).toBe(4)
+  })
+})
+
+// 2026-07-12: technical enforcement of Yoda's write restriction (previously
+// prose-only in his CLAUDE.md). Scoped to the literal agent name 'yoda', not
+// a fleet-wide rule -- see agentGetsYodaWriteGuard's own comment for why.
+// Exceptional routing (Laci + independent GPT agreement): Yoda was excluded
+// from designing/reviewing his own restriction, so this wiring-test suite
+// (like the guard itself) went through EliteAI+GPT only.
+describe('yoda-write-guard scaffold wiring', () => {
+  it('applies ONLY to yoda, not other sub-agents or the main agent', () => {
+    expect(agentGetsYodaWriteGuard('yoda')).toBe(true)
+    expect(agentGetsYodaWriteGuard('nano')).toBe(false)
+    expect(agentGetsYodaWriteGuard('nina')).toBe(false)
+    expect(agentGetsYodaWriteGuard(MAIN_AGENT_ID)).toBe(false)
+  })
+  it('injectYodaWriteGuard is idempotent (no duplicate on respawn)', () => {
+    const s: Record<string, unknown> = {}
+    injectYodaWriteGuard(s)
+    injectYodaWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.filter((e) => JSON.stringify(e).includes('yoda-write-guard.mjs')).length).toBe(1)
+  })
+  it('the hook matcher covers Bash|Edit|Write|NotebookEdit', () => {
+    const s: Record<string, unknown> = {}
+    injectYodaWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as Array<{ matcher: string }>)
+    const entry = pre.find((e) => JSON.stringify(e).includes('yoda-write-guard.mjs'))
+    expect(entry!.matcher).toBe('Bash|Edit|Write|NotebookEdit')
+  })
+  it('coexists with the other PreToolUse hooks without clobbering them', () => {
+    const s: Record<string, unknown> = {}
+    injectSelfPaceGate(s)
+    injectDestructiveOpGate(s)
+    injectConstitutionGuard('yoda', s)
+    injectSkillWriteGuard(s)
+    injectYodaWriteGuard(s)
+    const pre = ((s.hooks as Record<string, unknown>).PreToolUse as unknown[])
+    expect(pre.some((e) => JSON.stringify(e).includes('self-pace-gate.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('destructive-op-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('claude-constitution-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('skill-write-guard.mjs'))).toBe(true)
+    expect(pre.some((e) => JSON.stringify(e).includes('yoda-write-guard.mjs'))).toBe(true)
+    expect(pre.length).toBe(5)
+  })
+})
+
+// 2026-07-12: taskstate-persistence fix (kanban 95cf1ffb). The SessionStart
+// matcher was compact|resume only, from the one-time template seed -- never
+// re-applied on respawn (unlike the PreToolUse gates), so an existing agent's
+// matcher stayed stale forever. This is the re-applied-on-every-spawn fix.
+describe('taskstate-replay SessionStart matcher widening', () => {
+  it('applies to sub-agents, exempts the main agent', () => {
+    expect(agentGetsTaskstateStartupReplay('nano')).toBe(true)
+    expect(agentGetsTaskstateStartupReplay('yoda')).toBe(true)
+    expect(agentGetsTaskstateStartupReplay('nina')).toBe(true)
+    expect(agentGetsTaskstateStartupReplay(MAIN_AGENT_ID)).toBe(false)
+  })
+  it('widens an EXISTING compact|resume matcher to include startup, without touching the command', () => {
+    const s: Record<string, unknown> = {
+      hooks: {
+        SessionStart: [
+          {
+            matcher: 'compact|resume',
+            hooks: [{ type: 'command', command: 'python3 /x/scripts/hooks/taskstate-replay.py', timeout: 15 }],
+          },
+        ],
+      },
+    }
+    injectTaskstateStartupReplay(s)
+    const entries = ((s.hooks as Record<string, unknown>).SessionStart as Array<{ matcher: string; hooks: Array<{ command: string }> }>)
+    expect(entries.length).toBe(1)
+    expect(entries[0].matcher).toBe('compact|resume|startup')
+    expect(entries[0].hooks[0].command).toContain('taskstate-replay.py')
+  })
+  it('is idempotent (re-running on an already-widened matcher is a no-op, no duplicate entries)', () => {
+    const s: Record<string, unknown> = {}
+    injectTaskstateStartupReplay(s)
+    injectTaskstateStartupReplay(s)
+    const entries = ((s.hooks as Record<string, unknown>).SessionStart as unknown[])
+    expect(entries.length).toBe(1)
+  })
+  it('adds a fresh entry (matching the template shape) when no taskstate-replay SessionStart hook exists yet', () => {
+    const s: Record<string, unknown> = {}
+    injectTaskstateStartupReplay(s)
+    const entries = ((s.hooks as Record<string, unknown>).SessionStart as Array<{ matcher: string }>)
+    expect(entries.length).toBe(1)
+    expect(entries[0].matcher).toBe('compact|resume|startup')
+  })
+  it('does not clobber an unrelated SessionStart entry', () => {
+    const s: Record<string, unknown> = {
+      hooks: {
+        SessionStart: [
+          { matcher: 'startup', hooks: [{ type: 'command', command: 'python3 /x/some-other-hook.py' }] },
+        ],
+      },
+    }
+    injectTaskstateStartupReplay(s)
+    const entries = ((s.hooks as Record<string, unknown>).SessionStart as Array<{ matcher: string; hooks: Array<{ command: string }> }>)
+    expect(entries.length).toBe(2)
+    expect(entries.some((e) => e.hooks[0].command.includes('some-other-hook.py'))).toBe(true)
+    expect(entries.some((e) => e.matcher === 'compact|resume|startup')).toBe(true)
   })
 })

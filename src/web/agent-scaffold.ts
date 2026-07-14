@@ -195,6 +195,11 @@ export function writeAgentSettingsFromProfile(name: string, profile: ProfileTemp
   // posed question -- is covered by the self-pace block + the #0 CLAUDE.md doctrine.
   if (agentGetsEmailGate(name)) injectEmailSendGate(existing)
   if (agentGetsGovernanceGates(name)) injectSelfPaceGate(existing)
+  if (agentGetsDestructiveOpGate(name)) injectDestructiveOpGate(existing)
+  if (agentGetsConstitutionGuard(name)) injectConstitutionGuard(name, existing)
+  if (agentGetsSkillWriteGuard(name)) injectSkillWriteGuard(existing)
+  if (agentGetsYodaWriteGuard(name)) injectYodaWriteGuard(existing)
+  if (agentGetsTaskstateStartupReplay(name)) injectTaskstateStartupReplay(existing)
   atomicWriteFileSync(settingsPath, JSON.stringify(existing, null, 2))
 }
 
@@ -260,6 +265,234 @@ export function injectSelfPaceGate(existing: Record<string, unknown>): void {
   const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
   hooks.PreToolUse = [
     ...prev.filter((e) => !JSON.stringify(e).includes('self-pace-gate.mjs')),
+    entry,
+  ]
+}
+
+// Which agents are subject to the destructive-op guard: every agent EXCEPT the
+// main agent (same name-agnostic main-exempt rule as the other gates -- the
+// main agent gets the equivalent protection via its own root .claude/settings.json
+// -> scripts/hooks/eliteai-guard.mjs, a thin wrapper over the SAME shared core
+// this hook points at). Pure + exported so the main-exempt guarantee is unit-testable.
+//
+// 2026-07-10 guard-unification: before this, only the main agent had ANY
+// protection against destructive rm/SQL/DB/filesystem operations. nano in
+// particular runs on Opus and actually builds/executes code -- the fleet's
+// highest-risk executor -- with zero coverage. Found independently by two
+// reviews (a fleet self-audit + the new Yoda advisor agent) on 2026-07-10.
+export function agentGetsDestructiveOpGate(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Idempotently wire the destructive-op-guard PreToolUse hook (blocks
+// catastrophic rm -rf, force-push, destructive SQL, DB overwrite, filesystem-
+// destroying ops, obfuscated exec -- see scripts/hooks/destructive-op-guard.mjs
+// for the full pattern list). Same shape + dedupe discipline as the other
+// inject* functions. Bash-only matcher: the threat model here is EXECUTING a
+// destructive command, which requires Bash (unlike self-pace-gate, whose
+// threat model includes a direct file WRITE to the schedule store).
+export function injectDestructiveOpGate(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = `node ${join(PROJECT_ROOT, 'scripts', 'hooks', 'destructive-op-guard.mjs')}`
+  const entry = {
+    matcher: 'Bash',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('destructive-op-guard.mjs')),
+    entry,
+  ]
+}
+
+// Which agents are subject to the skill-write guard: every agent EXCEPT the
+// main agent (same name-agnostic main-exempt rule as the other gates). The
+// main agent is the OUT-OF-BAND issuer of the guard's own approval tokens
+// (direct fs write to store/.skill-write-approval, never through this hook),
+// so it must stay unwired -- gating the main agent's own session would block
+// the exact action the whole mechanism depends on.
+//
+// 2026-07-11: K1 of the injection-defense package (Yoda spec msg_id:364,
+// built by Nano, adversarially re-verified by Yoda -- symlink/TOCTOU handled
+// via realpath-at-hook-time, token-replay closed via one-time nonce
+// consumption). GPT-crosscheck: GO-with-conditions (store/self-audit/
+// skill-write-guard-crosscheck.md), conditions satisfied by Yoda's own re-run
+// of the e2e suite (17/17) plus independent adversarial probes.
+export function agentGetsSkillWriteGuard(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Idempotently wire the skill-write-guard PreToolUse hook (blocks
+// unauthorized writes to global skills / scheduled-tasks and to the guard's
+// own approval-token / audit-log / consumed-nonce-ledger files -- see
+// scripts/hooks/skill-write-guard.mjs for the full rule set). Same shape +
+// dedupe discipline as the other inject* functions. Matcher MUST include
+// Bash|Edit|Write|NotebookEdit -- a Bash-only matcher would let a native
+// Write call sail past unseen (the constitution-guard lesson, 2026-07-11).
+export function injectSkillWriteGuard(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = `node ${join(PROJECT_ROOT, 'scripts', 'hooks', 'skill-write-guard.mjs')}`
+  const entry = {
+    matcher: 'Bash|Edit|Write|NotebookEdit',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('skill-write-guard.mjs')),
+    entry,
+  ]
+}
+
+// Which agent(s) get the Yoda write-restriction guard: intentionally scoped
+// to the literal name 'yoda', not a role/config lookup -- unlike the other
+// gates (which apply fleet-wide via a MAIN_AGENT_ID-relative rule), this
+// guard targets one specific agent's specific role (the fleet's reviewer/
+// advisor, who must be read-only by default). Same scoping precedent as
+// nano-worktree-guard.mjs (nano-specific by design, not a general rule).
+//
+// 2026-07-12: Laci requested a TECHNICAL enforcement of what had only been a
+// CLAUDE.md prose rule ("Yoda never writes code"). Exceptional routing: since
+// the hardening's SUBJECT is Yoda himself, the usual EliteAI->Yoda->Nano
+// design/review chain was bypassed for this one task (conflict of interest,
+// confirmed independently by GPT) -- EliteAI ran ideation + crosscheck
+// directly, Nano built it, EliteAI reviewed it. GPT-crosscheck: GO (single
+// condition -- a committed regression suite -- satisfied by Nano).
+export function agentGetsYodaWriteGuard(name: string): boolean {
+  return name === 'yoda'
+}
+
+// Idempotently wire the yoda-write-guard PreToolUse hook (default-deny for
+// ALL write-intent in Yoda's session; unblocked only by a Laci-issued,
+// out-of-band, time-limited, one-time approval token in
+// store/.yoda-write-approval -- see scripts/hooks/yoda-write-guard.mjs for
+// the full rule set, including the network-call and agent-own-skill carve-
+// outs). Same shape + dedupe discipline as the other inject* functions.
+export function injectYodaWriteGuard(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = `node ${join(PROJECT_ROOT, 'scripts', 'hooks', 'yoda-write-guard.mjs')}`
+  const entry = {
+    matcher: 'Bash|Edit|Write|NotebookEdit',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('yoda-write-guard.mjs')),
+    entry,
+  ]
+}
+
+// Which agents get the taskstate SessionStart matcher extended to include
+// `startup` (every sub-agent, same main-exempt rule as the other gates --
+// the main agent isn't subject to the auto-restart-runner's fresh-restart
+// cycle the same way, and never carried the taskstate-replay hook to begin
+// with). Pure + exported so the main-exempt guarantee is unit-testable.
+//
+// 2026-07-12 (kanban 95cf1ffb, taskstate-persistence fix): the replay hook's
+// SessionStart matcher was `compact|resume` only, from
+// templates/settings.json.template's one-time initial seed (never re-
+// applied on respawn, unlike the PreToolUse gates above). The DOMINANT
+// fleet lifecycle event -- a scheduled fresh restart -- gives the new
+// session source=startup, which the matcher silently excluded: even with
+// the F1 drain fix writing a fresh taskstate record, the hook would never
+// even fire to replay it. Deploy order matters here (Yoda's condition):
+// the record-gated replay logic (src/web/agent-taskstate.ts) must already
+// be live BEFORE this matcher widens, so there is no window where the hook
+// fires on startup against pre-fix (ungated) replay logic.
+export function agentGetsTaskstateStartupReplay(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Idempotently widen the taskstate-replay SessionStart hook's matcher to
+// `compact|resume|startup` (from whatever matcher currently exists on that
+// entry -- tolerant of a fresh agent whose template already shipped the
+// wide matcher). Does not touch other SessionStart entries (e.g. a future
+// unrelated hook) or the command/timeout of this one.
+export function injectTaskstateStartupReplay(existing: Record<string, unknown>): void {
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const prev = Array.isArray(hooks.SessionStart) ? (hooks.SessionStart as Array<Record<string, unknown>>) : []
+  let found = false
+  const next = prev.map((entry) => {
+    if (typeof entry?.matcher === 'string' && JSON.stringify(entry).includes('taskstate-replay.py')) {
+      found = true
+      return { ...entry, matcher: 'compact|resume|startup' }
+    }
+    return entry
+  })
+  if (found) {
+    hooks.SessionStart = next
+    return
+  }
+  // No pre-existing taskstate-replay SessionStart entry (e.g. a brand-new
+  // agent scaffolded after this function was added) -- add one directly,
+  // matching the shape templates/settings.json.template seeds.
+  hooks.SessionStart = [
+    ...prev,
+    {
+      matcher: 'compact|resume|startup',
+      hooks: [{ type: 'command', command: `python3 ${join(PROJECT_ROOT, 'scripts', 'hooks', 'taskstate-replay.py')}`, timeout: 15 }],
+    },
+  ]
+}
+
+// Canonical source copy for the per-agent constitution-guard hook. Unlike the
+// other inject* gates (which point at ONE shared script under scripts/), this
+// hook must physically EXIST inside EACH agent's own .claude/hooks/ dir --
+// its self-protection (OWN_SETTINGS_PATH) is derived from the hook file's own
+// location on disk (agents/<name>/.claude/hooks/<this file> -> sibling
+// settings.json), so a shared/symlinked copy would self-protect the WRONG
+// agent. The template itself lives under the TRACKED scripts/hooks/ (NOT
+// inside agents/, which is gitignored -- a fresh install/clone must still be
+// able to propagate this guard to every newly-scaffolded agent).
+const CONSTITUTION_GUARD_TEMPLATE_PATH =
+  join(PROJECT_ROOT, 'scripts', 'hooks', 'claude-constitution-guard.mjs')
+
+// Which agents are subject to the constitution-guard: every agent EXCEPT the
+// main agent (same name-agnostic main-exempt rule as the other gates -- the
+// main agent's own CLAUDE.md/SOUL.md self-edit is a legitimate, intended
+// Laci-facing capability, not a threat this hook is meant to cover).
+//
+// 2026-07-11: added after Yoda's fleet-behavior audit found (a) the guard was
+// only manually copied to 3 of 5 sub-agents (nina/yoda had none at all), and
+// (b) even where present it did not protect SOUL.md, which is exactly the
+// file type Yoda found had gone stale/self-contradictory in muszaki's and
+// besanyi's copies. GPT-crosscheck: GO (constitution-guard-hardening-ideation.md).
+export function agentGetsConstitutionGuard(name: string): boolean {
+  return name !== MAIN_AGENT_ID
+}
+
+// Idempotently (a) propagate the canonical constitution-guard.mjs into this
+// agent's own .claude/hooks/ dir (overwritten every call so all agents stay
+// byte-identical -- self-healing against the exact kind of manual-copy drift
+// that let muszaki's/besanyi's copies fall behind nano's before this existed),
+// and (b) wire it into PreToolUse. Same dedupe discipline as the other
+// inject* functions.
+export function injectConstitutionGuard(name: string, existing: Record<string, unknown>): void {
+  const agentRoot = agentDir(name)
+  const hooksDir = join(agentRoot, '.claude', 'hooks')
+  const destPath = join(hooksDir, 'claude-constitution-guard.mjs')
+  if (existsSync(CONSTITUTION_GUARD_TEMPLATE_PATH)) {
+    mkdirSync(hooksDir, { recursive: true })
+    copyFileSync(CONSTITUTION_GUARD_TEMPLATE_PATH, destPath)
+  }
+  const hooks = (existing.hooks && typeof existing.hooks === 'object'
+    ? existing.hooks
+    : (existing.hooks = {})) as Record<string, unknown>
+  const command = `node ${destPath}`
+  const entry = {
+    matcher: 'Bash|Write|Edit|NotebookEdit',
+    hooks: [{ type: 'command', command, timeout: 10 }],
+  }
+  const prev = Array.isArray(hooks.PreToolUse) ? (hooks.PreToolUse as unknown[]) : []
+  hooks.PreToolUse = [
+    ...prev.filter((e) => !JSON.stringify(e).includes('claude-constitution-guard.mjs')),
     entry,
   ]
 }

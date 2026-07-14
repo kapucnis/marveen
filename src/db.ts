@@ -529,9 +529,15 @@ export function initDatabase(dbPathOverride?: string): void {
     CREATE TABLE IF NOT EXISTS token_usage_cursors (
       file_path TEXT PRIMARY KEY,
       last_line INTEGER NOT NULL DEFAULT 0,
-      last_size INTEGER NOT NULL DEFAULT 0
+      last_size INTEGER NOT NULL DEFAULT 0,
+      last_task_title TEXT
     )
   `)
+  // 2026-07-10: carries the last-derived task_title forward across incremental
+  // ingest runs (see collectTokenUsage) -- without it, an hourly-batched read
+  // of a long turn's assistant/tool_use lines has no way to know the label
+  // derived from the triggering user-turn line read in an EARLIER batch.
+  try { db.exec('ALTER TABLE token_usage_cursors ADD COLUMN last_task_title TEXT') } catch { /* already exists */ }
 
   // --- Idea Box ---
   db.exec(`

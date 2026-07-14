@@ -16,6 +16,11 @@ reports/
 !.claude/settings.json
 .config/
 
+# Key-capture helper: never leaks a secret itself, but a future edit +
+# `git add -A` could paste one in. Deliberately kept out of the repo
+# (2026-07-10 audit decision) while its sibling scripts got committed.
+scripts/set-openai-key.sh
+
 # Database
 *.db
 *.db-shm

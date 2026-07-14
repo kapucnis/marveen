@@ -171,6 +171,86 @@ describe('collectTokenUsage', () => {
 
     expect(true).toBe(true)
   })
+
+  // 2026-07-10 audit: task_title was ~94% null in production. Root cause --
+  // collectTokenUsage ingests each JSONL file INCREMENTALLY (cursor = last
+  // line read), and parseJsonlFile's `currentTaskTitle` used to always start
+  // at null. A long turn's triggering <scheduled-task>/<channel> marker line
+  // (read in an EARLIER hourly ingest batch) never reached the assistant/
+  // tool_use lines that arrived in a LATER batch, so those rows got
+  // task_title=null even though they belonged to a known, labeled task. Fixed
+  // by threading the previous run's last-derived label back in via the
+  // token_usage_cursors.last_task_title column.
+  describe('taskTitle carries across incremental ingest batches (regression for the 94%-null bug)', () => {
+    const userLine = JSON.stringify({
+      type: 'user',
+      sessionId: 'sess-incremental',
+      message: { content: '<scheduled-task source="scheduled-task:memoria-heartbeat"> do the thing </scheduled-task>' },
+    })
+    const asst = (ts: string) => makeJsonlLine({ sessionId: 'sess-incremental', timestamp: ts })
+
+    it('first batch (user marker + assistant line together) derives and returns the label', async () => {
+      const file = join(TEST_DIR, 'incremental-1.jsonl')
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z')].join('\n') + '\n')
+      const { parseJsonlFile } = await import('../web/token-usage.js')
+
+      const { calls, lastTaskTitle } = await parseJsonlFile(file, 'test-incremental', 0, null)
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0].taskTitle).toBe('memoria-heartbeat')
+      expect(lastTaskTitle).toBe('memoria-heartbeat')
+    })
+
+    it('BUG (documented): a later batch seeded with null loses the label', async () => {
+      const file = join(TEST_DIR, 'incremental-2.jsonl')
+      const { parseJsonlFile } = await import('../web/token-usage.js')
+
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z')].join('\n') + '\n')
+      const before = await parseJsonlFile(file, 'test-incremental', 0, null)
+
+      // Simulate the file growing with more assistant turns from the SAME
+      // triggering user marker, and a second ingest pass starting from where
+      // the first left off -- this is exactly what the hourly collectTokenUsage
+      // poll does. Old behavior: initialTaskTitle was hardcoded to null here.
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z'), asst('2026-05-20T10:05:00Z')].join('\n') + '\n')
+      const after = await parseJsonlFile(file, 'test-incremental', before.linesRead, null)
+
+      expect(after.calls).toHaveLength(1)
+      expect(after.calls[0].taskTitle).toBeNull() // the bug, reproduced on purpose
+    })
+
+    it('FIX: seeding initialTaskTitle from the previous run carries the label forward', async () => {
+      const file = join(TEST_DIR, 'incremental-3.jsonl')
+      const { parseJsonlFile } = await import('../web/token-usage.js')
+
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z')].join('\n') + '\n')
+      const first = await parseJsonlFile(file, 'test-incremental', 0, null)
+
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z'), asst('2026-05-20T10:05:00Z'), asst('2026-05-20T10:10:00Z')].join('\n') + '\n')
+      const second = await parseJsonlFile(file, 'test-incremental', first.linesRead, first.lastTaskTitle)
+
+      expect(second.calls).toHaveLength(2)
+      expect(second.calls.every(c => c.taskTitle === 'memoria-heartbeat')).toBe(true)
+      expect(second.lastTaskTitle).toBe('memoria-heartbeat')
+    })
+
+    it('a NEW marker in a later batch overrides the carried-forward label', async () => {
+      const file = join(TEST_DIR, 'incremental-4.jsonl')
+      const { parseJsonlFile } = await import('../web/token-usage.js')
+      const adHocLine = JSON.stringify({
+        type: 'user',
+        sessionId: 'sess-incremental',
+        message: { content: '<channel source="telegram" chat_id="1">hi</channel>' },
+      })
+      writeFileSync(file, [userLine, asst('2026-05-20T10:00:00Z'), adHocLine, asst('2026-05-20T10:15:00Z')].join('\n') + '\n')
+
+      const { calls, lastTaskTitle } = await parseJsonlFile(file, 'test-incremental', 0, null)
+
+      expect(calls[0].taskTitle).toBe('memoria-heartbeat')
+      expect(calls[1].taskTitle).toBe('ad-hoc')
+      expect(lastTaskTitle).toBe('ad-hoc')
+    })
+  })
 })
 
 describe('getTokenSummary', () => {

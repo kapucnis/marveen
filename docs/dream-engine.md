@@ -25,3 +25,5 @@ Olyan, mintha az asszisztens éjszaka "átgondolná a napot": mit tanultunk, mit
 5. **🛠 Skill-flotta health** — elavult (nem-pinned, régóta nem használt) skill-ek jelzése.
 
 Reggel a napindító a `DREAM.md` 5 bucketjét teszi a jelentés élére, az email/naptár/AI-hírek szekciók elé. Minden művelet helyi (SQL + opcionális helyi embedding), nincs külső API-hívás. Akadály esetén a `DREAM.md` végére hiba-szekció kerül, amit reggel látsz.
+
+> **Megjegyzés (2026-07-10, Yoda review):** ha valaha a FŐ-agens (eliteai) saját auto-restartját is bekapcsolod (`PUT /api/agents/eliteai/auto-restart` -- ma csak a sub-agenteknek van bekapcsolva), az ÜTEMEZÉSE NE essen a 02:07-03:11-es sávba, mert az élő dream-engine futást vágná el.

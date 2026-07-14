@@ -159,17 +159,23 @@ export function collapseByMessageId(calls: ParsedCall[]): ParsedCall[] {
   return out
 }
 
-async function parseJsonlFile(
+export async function parseJsonlFile(
   filePath: string,
   agent: string,
   fromLine: number,
-): Promise<{ calls: ParsedCall[]; linesRead: number }> {
+  initialTaskTitle: string | null,
+): Promise<{ calls: ParsedCall[]; linesRead: number; lastTaskTitle: string | null }> {
   const calls: ParsedCall[] = []
   let lineNum = 0
   let sessionId = ''
   // The task label of the most recent recognizable trigger, carried forward
   // onto the assistant calls it produced (updated only on a recognized marker).
-  let currentTaskTitle: string | null = null
+  // Seeded from the PREVIOUS ingest run's last label (see collectTokenUsage) --
+  // otherwise every hourly incremental read starts this at null, and a long
+  // turn's user-marker line (read in an earlier batch) never reaches the
+  // assistant/tool_use lines this batch actually contains. That produced the
+  // ~94%-null task_title rate this fix addresses (2026-07-10 audit).
+  let currentTaskTitle: string | null = initialTaskTitle
 
   const rl = createInterface({
     input: createReadStream(filePath, { encoding: 'utf-8' }),
@@ -242,7 +248,7 @@ async function parseJsonlFile(
 
   // Collapse the multi-line tool-turn rows (same message id, repeated usage)
   // before they reach the DB -- this is the fix for the ~2x token inflation.
-  return { calls: collapseByMessageId(calls), linesRead: lineNum }
+  return { calls: collapseByMessageId(calls), linesRead: lineNum, lastTaskTitle: currentTaskTitle }
 }
 
 export async function collectTokenUsage(): Promise<{ inserted: number; files: number }> {
@@ -251,8 +257,8 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
   let totalInserted = 0
   let totalFiles = 0
 
-  const getCursor = db.prepare('SELECT last_line, last_size FROM token_usage_cursors WHERE file_path = ?')
-  const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size) VALUES (?, ?, ?)')
+  const getCursor = db.prepare('SELECT last_line, last_size, last_task_title FROM token_usage_cursors WHERE file_path = ?')
+  const setCursor = db.prepare('INSERT OR REPLACE INTO token_usage_cursors (file_path, last_line, last_size, last_task_title) VALUES (?, ?, ?, ?)')
   const insertCall = db.prepare(`
     INSERT OR IGNORE INTO token_usage (agent, session_id, timestamp, input_tokens, output_tokens,
       cache_read_tokens, cache_creation_tokens, content_preview, tool_name, task_title)
@@ -265,13 +271,18 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
       let fileSize: number
       try { fileSize = statSync(file).size } catch { continue }
 
-      const cursor = getCursor.get(file) as { last_line: number; last_size: number } | undefined
+      const cursor = getCursor.get(file) as { last_line: number; last_size: number; last_task_title: string | null } | undefined
       if (cursor && cursor.last_size === fileSize) continue
 
-      const fromLine = (cursor && cursor.last_size <= fileSize) ? cursor.last_line : 0
+      // A truncated/rotated file (last_size > current size) is read from
+      // scratch -- the carried-forward label from the old cursor no longer
+      // applies to a different file body, so it resets to null along with fromLine.
+      const resuming = !!cursor && cursor.last_size <= fileSize
+      const fromLine = resuming ? cursor.last_line : 0
+      const initialTaskTitle = resuming ? (cursor.last_task_title ?? null) : null
 
       try {
-        const { calls, linesRead } = await parseJsonlFile(file, source.agent, fromLine)
+        const { calls, linesRead, lastTaskTitle } = await parseJsonlFile(file, source.agent, fromLine, initialTaskTitle)
 
         if (calls.length > 0) {
           const tx = db.transaction(() => {
@@ -283,12 +294,12 @@ export async function collectTokenUsage(): Promise<{ inserted: number; files: nu
                 c.contentPreview || null, c.toolName, c.taskTitle || null,
               )
             }
-            setCursor.run(file, linesRead, fileSize)
+            setCursor.run(file, linesRead, fileSize, lastTaskTitle)
           })
           tx()
           totalInserted += calls.length
         } else {
-          setCursor.run(file, linesRead, fileSize)
+          setCursor.run(file, linesRead, fileSize, lastTaskTitle)
         }
         totalFiles++
       } catch (err) {

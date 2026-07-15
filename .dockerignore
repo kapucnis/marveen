@@ -1,0 +1,36 @@
+# Build-context hygiene for the Marveen image build.
+# The Dockerfile only needs: package.json, package-lock.json, tsconfig.json,
+# src/, web/, templates/, seed-config/, scripts/, docker/. Everything else is
+# excluded to keep the context small and to keep secrets / runtime data OUT.
+
+# Secrets -- NEVER copy into the build context or an image layer (C7).
+.env
+.env.*
+!.env.example
+
+# Dependencies + build output (rebuilt inside the image).
+node_modules
+dist
+
+# Runtime data / persisted state (lives in the named volume, not the image).
+store
+dist_backup*
+agents
+personas
+
+# Local/agent + VCS + editor noise.
+.git
+.gitignore
+.claude
+_camtest
+_guardtest
+*.log
+npm-debug.log*
+
+# Tests + tooling not needed to run the service.
+**/__tests__
+**/*.test.ts
+tests
+playwright.config.ts
+playwright-report
+test-results

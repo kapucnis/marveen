@@ -7,6 +7,7 @@ import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS
 import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
 import { isBlockedCrossOriginWrite, originMatchesServedHost } from './web/csrf-origin.js'
 import { json } from './web/http-helpers.js'
+import { getDb } from './db.js'
 import { detectLanIp } from './web/network-info.js'
 import { AGENTS_BASE_DIR, listAgentNames } from './web/agent-config.js'
 import { ensureAgentHooks, ensureAgentStalenessHook, ensureDefaultScheduledTasks, agentSettingsPath } from './web/agent-scaffold.js'
@@ -107,6 +108,20 @@ export function startWebServer(port = 3420): http.Server {
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
     }
     if (method === 'OPTIONS') { res.writeHead(204); res.end(); return }
+
+    // C6: container / orchestrator healthcheck. Token-free and handled BEFORE the
+    // auth gate and every router, so a health probe never carries a bearer token.
+    // Exposes ONLY liveness + a single DB round-trip (SELECT 1) -- no counts, no
+    // config, nothing sensitive. Returns 503 when the DB probe fails so
+    // `curl -f` (the compose healthcheck) marks the container unhealthy.
+    if (path === '/healthz' && method === 'GET') {
+      let db = 'error'
+      try {
+        const row = getDb().prepare('SELECT 1 AS ok').get() as { ok?: number } | undefined
+        if (row?.ok === 1) db = 'ok'
+      } catch { db = 'error' }
+      return json(res, { ok: db === 'ok', db }, db === 'ok' ? 200 : 503)
+    }
 
     // Block state-changing requests from browsers running on foreign origins.
     // Same-origin fetches (Origin absent, allowlisted, or matching the host the

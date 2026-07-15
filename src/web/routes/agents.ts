@@ -3,7 +3,7 @@ import { join, extname, dirname } from 'node:path'
 import { homedir, platform, tmpdir } from 'node:os'
 import { execSync } from 'node:child_process'
 import { logger } from '../../logger.js'
-import { MAIN_AGENT_ID, BOT_NAME, PROJECT_ROOT } from '../../config.js'
+import { MAIN_AGENT_ID, BOT_NAME, PROJECT_ROOT, agentRuntimeAvailable } from '../../config.js'
 import { createAgentMessage, listPendingChannelRequests, updateChannelRequestStatus, getDb, claimPendingForAgent } from '../../db.js'
 import { classifyAgentMessage, wrapAgentMessageForDelivery } from '../agent-message-wrap.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
@@ -113,7 +113,7 @@ import {
 } from '../profiles.js'
 import { sanitizeAgentName, safeJoin } from '../sanitize.js'
 import { parseMultipart } from '../multipart.js'
-import { readBody, json, serveFile } from '../http-helpers.js'
+import { readBody, json, serveFile, agentRuntimeUnavailable } from '../http-helpers.js'
 import {
   exportAgentBundle,
   importAgentBundle,
@@ -332,9 +332,16 @@ interface AgentSummary {
   hasGooglechat: boolean
   hasTeams: boolean
   status: 'configured' | 'draft'
-  running: boolean
-  /** Tri-state: 'running' | 'stopped' | 'unreachable' (remote ssh failure). */
-  runState: AgentRunState
+  /** true/false when the host agent runtime is reachable; NULL = UNKNOWN, used
+   *  when AGENT_RUNTIME=none (we cannot inspect tmux, so we must not assert a
+   *  false 'stopped') -- see runtimeReason. */
+  running: boolean | null
+  /** 'running' | 'stopped' | 'unreachable' (remote ssh failure), or 'unknown'
+   *  when the host agent runtime is unavailable (AGENT_RUNTIME=none). */
+  runState: AgentRunState | 'unknown'
+  /** Set to 'agent-runtime-unavailable' when this deployment has no host agent
+   *  runtime, so the UI can show "unavailable" instead of a real run-state. */
+  runtimeReason?: string
   /** Remote ssh destination + workdir, or null for a local agent. */
   remoteHost: string | null
   remoteWorkdir: string | null
@@ -377,14 +384,18 @@ function getAgentSummary(name: string): AgentSummary {
   // it; `unreachable` reads as not-running but is surfaced distinctly so the UI
   // does not show a still-alive remote agent as "stopped".
   const remote = readAgentRemoteConfig(name)
-  const runState = agentRunStateCached(name, remote.host != null)
-  const running = runState === 'running'
+  // C2: without the host agent runtime (AGENT_RUNTIME=none) we cannot inspect
+  // tmux, so run-state is UNKNOWN -- never a false 'stopped'/running:false, which
+  // would mislead the UI and any downstream logic (Yoda refinement b).
+  const runtimeOn = agentRuntimeAvailable()
+  const runState: AgentRunState | 'unknown' = runtimeOn ? agentRunStateCached(name, remote.host != null) : 'unknown'
+  const running: boolean | null = runtimeOn ? (runState === 'running') : null
   const session = running ? agentSessionName(name) : undefined
   const runningSince = running ? getAgentRunningSince(name) : null
 
   // Reauth badge: only meaningful for a running session (a stopped agent has
-  // no pane to inspect). One capture-pane per running agent on the list poll.
-  const reauth = running ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
+  // no pane to inspect); also skipped entirely without the runtime (no pane).
+  const reauth = (runtimeOn && running) ? detectReauthNeeded(capturePane(agentSessionName(name))) : { needsReauth: false }
 
   return {
     name,
@@ -405,6 +416,7 @@ function getAgentSummary(name: string): AgentSummary {
     status: hasClaudeMd && hasSoulMd ? 'configured' : 'draft',
     running,
     runState,
+    ...(runtimeOn ? {} : { runtimeReason: 'agent-runtime-unavailable' }),
     remoteHost: remote.host,
     remoteWorkdir: remote.workdir,
     session,
@@ -650,6 +662,9 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (path === '/api/agents' && method === 'POST') {
+    // Create+start spawns a tmux agent session -- meaningless without the host
+    // agent runtime, so the whole endpoint 503s in that deployment (C2, Yoda).
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const body = await readBody(req)
     const data = JSON.parse(body.toString())
     const { description, model: rawModel, profile: rawProfile } = data as { name: string; description: string; model?: string; profile?: string }
@@ -1490,6 +1505,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   const startMatch = path.match(/^\/api\/agents\/([^/]+)\/start$/)
   if (startMatch && method === 'POST') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(startMatch[1])
     if (!existsSync(agentDir(name))) { json(res, { error: 'Agent not found' }, 404); return true }
     // Optional { "fresh": true } body -> no `--continue`. Required for channel
@@ -1508,6 +1524,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   const stopMatch = path.match(/^\/api\/agents\/([^/]+)\/stop$/)
   if (stopMatch && method === 'POST') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(stopMatch[1])
     const result = stopAgentProcess(name)
     // Explicit stop clears intent so the monitor will not resurrect it.
@@ -1547,6 +1564,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
 
   const restartMatch = path.match(/^\/api\/agents\/([^/]+)\/restart$/)
   if (restartMatch && method === 'POST') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(restartMatch[1])
     // The main agent runs in the systemd/launchd-managed `<id>-channels` session,
     // not the `agent-<name>` template. Restart it through the channels helper --

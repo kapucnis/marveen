@@ -7,7 +7,8 @@ import {
 } from '../../db.js'
 import { resolveFromPath } from '../../platform.js'
 import { logger } from '../../logger.js'
-import { readBody, json } from '../http-helpers.js'
+import { readBody, json, agentRuntimeUnavailable } from '../http-helpers.js'
+import { agentRuntimeAvailable } from '../../config.js'
 import type { RouteContext } from './types.js'
 
 const TMUX = resolveFromPath('tmux')
@@ -143,6 +144,8 @@ export async function tryHandleBackgroundTasks(ctx: RouteContext): Promise<boole
   const { req, res, path, method, url } = ctx
 
   if (path === '/api/background-tasks' && method === 'POST') {
+    // Spawns a tmux session -- unavailable without the host agent runtime (C2).
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const body = await readBody(req)
     const data = JSON.parse(body.toString()) as { agent_id: string; prompt: string }
     if (!data.prompt?.trim()) {
@@ -181,14 +184,20 @@ export async function tryHandleBackgroundTasks(ctx: RouteContext): Promise<boole
     const task = getBackgroundTask(taskMatch[1])
     if (!task) { json(res, { error: 'Háttérfeladat nem található' }, 404); return true }
 
+    // Live pane capture needs the host agent runtime. Without it the DB row is
+    // still served (200), but liveOutput stays null and an explicit
+    // runtime:"unavailable" marker lets the UI show "not available" instead of
+    // an empty terminal (C2, Yoda refinement a).
+    const runtimeOn = agentRuntimeAvailable()
     let liveOutput: string | null = null
-    if (task.status === 'running' && task.tmux_session) {
+    if (runtimeOn && task.status === 'running' && task.tmux_session) {
       liveOutput = captureSession(task.tmux_session)
     }
 
     json(res, {
       ...task,
       liveOutput,
+      runtime: runtimeOn ? 'available' : 'unavailable',
       started_label: new Date(task.started_at * 1000).toLocaleString('hu-HU', { timeZone: TZ }),
       finished_label: task.finished_at ? new Date(task.finished_at * 1000).toLocaleString('hu-HU', { timeZone: TZ }) : null,
     })
@@ -196,6 +205,8 @@ export async function tryHandleBackgroundTasks(ctx: RouteContext): Promise<boole
   }
 
   if (taskMatch && method === 'DELETE') {
+    // Cancel captures + kills the tmux session -- unavailable without the runtime (C2).
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const task = getBackgroundTask(taskMatch[1])
     if (!task) { json(res, { error: 'Háttérfeladat nem található' }, 404); return true }
     const output = task.tmux_session ? captureSession(task.tmux_session) : null

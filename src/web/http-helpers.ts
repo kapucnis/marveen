@@ -63,6 +63,15 @@ export function json(res: http.ServerResponse, data: unknown, status = 200): voi
   res.end(JSON.stringify(data))
 }
 
+// C2: the single shared response for a tmux-touching endpoint called while the
+// host agent runtime is unavailable (AGENT_RUNTIME=none). One body, one status,
+// used at every such call site so the deployment contract is uniform -- callers
+// must not hand-write their own 503 body.
+export const AGENT_RUNTIME_UNAVAILABLE_ERROR = 'Agent runtime not available in this deployment'
+export function agentRuntimeUnavailable(res: http.ServerResponse): void {
+  json(res, { error: AGENT_RUNTIME_UNAVAILABLE_ERROR }, 503)
+}
+
 /**
  * Normalise an If-None-Match value for comparison with an ETag. Strips a
  * single leading W/ prefix (weak validator) so `W/"abc"` compares equal to

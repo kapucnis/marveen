@@ -158,6 +158,24 @@ export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
 
 export const WEB_HOST = env['WEB_HOST'] ?? '127.0.0.1'
 
+// C2: AGENT_RUNTIME marks whether the host-side agent runtime (tmux + Claude Code
+// CLI) is reachable from this process. In the container deployment it is set to
+// "none" -- the agent sessions run on the host, not in the image. This is a
+// SEPARATE gate from WEB_ONLY (a staging preview that also strips the dashboard):
+// under AGENT_RUNTIME=none the dashboard still fully serves, but every
+// tmux-touching background service is gated off and every tmux-touching API
+// endpoint returns a 503 / degraded response. Unset or any value other than
+// "none" means the runtime IS available -- so existing host installs and every
+// test are unaffected by default. Read once at boot (an env var, never mutated).
+export const AGENT_RUNTIME = env['AGENT_RUNTIME'] ?? ''
+
+// The single source of truth for "may this process touch the agent runtime".
+// Used both by the web.ts startup gating (a background service starts only when
+// !webOnly AND agentRuntimeAvailable()) and by the tmux-touching route guards.
+export function agentRuntimeAvailable(): boolean {
+  return AGENT_RUNTIME.toLowerCase() !== 'none'
+}
+
 // Kanban card aging visual thresholds (hours since last update) and colours.
 // Override per-install via .env; defaults match the design spec (24/72/168h).
 export const KANBAN_AGING_WARN_H = parseInt(env['KANBAN_AGING_WARN_H'] ?? '24', 10)

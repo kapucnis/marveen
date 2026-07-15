@@ -9,7 +9,7 @@ import {
 import { join } from 'node:path'
 import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
-import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED } from './config.js'
+import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED, agentRuntimeAvailable } from './config.js'
 import { initDatabase } from './db.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
@@ -448,7 +448,7 @@ async function main(): Promise<void> {
   // sub-agent that reads the operator's calendar and DB, and a gated-off
   // machine (e.g. a dev box) must not fight the production host over the
   // channel.
-  if (shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
+  if (agentRuntimeAvailable() && shouldBootHeartbeatAgent({ respawnEnabled: RESPAWN_ENABLED, agentEnabled: HEARTBEAT_AGENT_ENABLED })) {
     ensureHeartbeatAgent()
     logger.info({ agent: HEARTBEAT_AGENT_NAME }, 'Heartbeat agent scaffold ensured (channel-less, dashboard-hidden)')
     // Linux credentials-guard, once at boot before any agent starts (opt-in,
@@ -468,17 +468,25 @@ async function main(): Promise<void> {
     logger.info('Heartbeat agent boot-start skipped (set HEARTBEAT_AGENT_ENABLED=1 on the respawn host to enable)')
   }
 
-  // Discord-only: ensure the operator-configured DISCORD_CHANNEL_ID is
-  // in access.groups so the plugin's outbound `reply` tool can send to
-  // server channels without a manual `/discord:access group add` step.
-  // No-op for non-discord providers.
-  ensureDiscordChannelGroup()
+  // C2: the channel-management startups below all drive host-side agent channels
+  // (Discord group bootstrap, Telegram invite pairing, Slack channel-request ->
+  // agent spawn). Under AGENT_RUNTIME=none the channels are owned by the host, not
+  // this container, so they are skipped entirely.
+  if (agentRuntimeAvailable()) {
+    // Discord-only: ensure the operator-configured DISCORD_CHANNEL_ID is
+    // in access.groups so the plugin's outbound `reply` tool can send to
+    // server channels without a manual `/discord:access group add` step.
+    // No-op for non-discord providers.
+    ensureDiscordChannelGroup()
 
-  // Telegram invite auto-approve monitor (one-click pairing).
-  startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
+    // Telegram invite auto-approve monitor (one-click pairing).
+    startInviteMonitor(MAIN_AGENT_ID, AGENTS_BASE_DIR)
 
-  // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
-  startChannelRequestWatcher()
+    // Slack channel request watcher (audit.jsonl -> pending_channel_requests).
+    startChannelRequestWatcher()
+  } else {
+    logger.info('AGENT_RUNTIME=none: channel-management startups skipped (Discord group / invite monitor / channel-request watcher)')
+  }
 
   // Store file audit watcher
   startStoreWatcher()

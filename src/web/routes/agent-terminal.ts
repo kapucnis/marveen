@@ -2,7 +2,8 @@ import { execFile, execFileSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { resolveFromPath } from '../../platform.js'
 import { logger } from '../../logger.js'
-import { readBody, json } from '../http-helpers.js'
+import { readBody, json, agentRuntimeUnavailable } from '../http-helpers.js'
+import { agentRuntimeAvailable } from '../../config.js'
 import { agentDir } from '../agent-config.js'
 import { agentSessionName, isAgentRunning } from '../agent-process.js'
 import { isMainChannelsAgent, MAIN_CHANNELS_SESSION } from '../main-agent.js'
@@ -117,6 +118,7 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   // --- live pane stream (SSE) ------------------------------------------
   const streamMatch = path.match(/^\/api\/agents\/([^/]+)\/pane\/stream$/)
   if (streamMatch && method === 'GET') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(streamMatch[1])
     const target = resolveTarget(name)
     if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }
@@ -168,6 +170,7 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   // --- keystroke injection ---------------------------------------------
   const keysMatch = path.match(/^\/api\/agents\/([^/]+)\/keys$/)
   if (keysMatch && method === 'POST') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(keysMatch[1])
     // SECURITY (2026-06-26 / 2026-07-05): this raw keystroke-injection endpoint --
     // the dashboard live-terminal write path (#275) -- lets a dashboard-token
@@ -230,6 +233,7 @@ export async function tryHandleAgentTerminal(ctx: RouteContext): Promise<boolean
   // --- scripted /login flow --------------------------------------------
   const loginMatch = path.match(/^\/api\/agents\/([^/]+)\/login$/)
   if (loginMatch && method === 'POST') {
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     const name = decodeURIComponent(loginMatch[1])
     const target = resolveTarget(name)
     if (!target.exists) { json(res, { error: 'Agent not found' }, 404); return true }

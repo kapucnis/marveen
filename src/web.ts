@@ -3,7 +3,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execSync, execFileSync } from 'node:child_process'
-import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID } from './config.js'
+import { PROJECT_ROOT, WEB_HOST, DASHBOARD_PUBLIC_URL, DASHBOARD_ALLOWED_ORIGINS, MAIN_AGENT_ID, agentRuntimeAvailable } from './config.js'
 import { loadOrCreateDashboardToken, checkBearerToken } from './web/dashboard-auth.js'
 import { isBlockedCrossOriginWrite, originMatchesServedHost } from './web/csrf-origin.js'
 import { json } from './web/http-helpers.js'
@@ -327,29 +327,42 @@ export function startWebServer(port = 3420): http.Server {
     logger.info('[staging] WEB_ONLY mode: background services disabled')
   }
 
-  const routerInterval = webOnly ? undefined : startMessageRouter()
-  if (!webOnly) logger.info('Agent message router started (5s poll)')
+  // C2: an agent-runtime-touching background service (message router, schedule
+  // runner, agent worker, session monitors/healers) starts only when BOTH gates
+  // pass -- WEB_ONLY is off AND the host agent runtime is available. The two gates
+  // are INDEPENDENT: WEB_ONLY keeps its staging semantics, and AGENT_RUNTIME=none
+  // (the container deployment) disables exactly the tmux-touching services while
+  // leaving the dashboard, API, memory, kanban and non-agent tasks (costs sync,
+  // update checker, token collection) running.
+  const agentRuntimeOn = agentRuntimeAvailable()
+  const agentServicesOn = !webOnly && agentRuntimeOn
+  if (!agentRuntimeOn) {
+    logger.warn('AGENT_RUNTIME=none: host agent runtime unavailable -- tmux-touching services disabled, their endpoints return 503/degraded')
+  }
 
-  const scheduleInterval = webOnly ? undefined : startScheduleRunner()
-  if (!webOnly) logger.info('Schedule runner started (60s poll)')
+  const routerInterval = agentServicesOn ? startMessageRouter() : undefined
+  if (agentServicesOn) logger.info('Agent message router started (5s poll)')
+
+  const scheduleInterval = agentServicesOn ? startScheduleRunner() : undefined
+  if (agentServicesOn) logger.info('Schedule runner started (60s poll)')
 
   // Pre-start the interactive agent worker (subscription backend) so the first
   // heartbeat / scheduled generation after boot does not pay the cold-boot
   // latency. runViaWorker still lazy-starts + restarts it on demand, so this is
   // a warm-up, not a hard dependency. Skipped on the SDK rollback backend.
-  if (!webOnly && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
+  if (agentServicesOn && (process.env.MARVEEN_AGENT_BACKEND || 'worker').toLowerCase() !== 'sdk') {
     import('./web/agent-worker.js')
       .then(m => { m.startWorkerSession(); logger.info('Interactive agent worker pre-started') })
       .catch(err => logger.warn({ err }, 'Failed to pre-start agent worker (will lazy-start on first use)'))
   }
 
-  const pluginMonitorInterval = webOnly ? undefined : startChannelPluginMonitor()
-  if (!webOnly) logger.info('Channel plugin health monitor started (60s poll)')
+  const pluginMonitorInterval = agentServicesOn ? startChannelPluginMonitor() : undefined
+  if (agentServicesOn) logger.info('Channel plugin health monitor started (60s poll)')
 
   // Userbot inbound-probe (gold-standard deafness detector). Safe no-op until
   // the prober session file + allowlist are configured. Wrapped so a failure
   // never crashes server startup.
-  if (!webOnly) {
+  if (agentServicesOn) {
     try {
       startInboundProber()
     } catch (err) {
@@ -357,8 +370,8 @@ export function startWebServer(port = 3420): http.Server {
     }
   }
 
-  const channelHealthInterval = webOnly ? undefined : startChannelHealthMonitor()
-  if (!webOnly) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
+  const channelHealthInterval = agentServicesOn ? startChannelHealthMonitor() : undefined
+  if (agentServicesOn) logger.info('Channel MCP health monitor started (60s poll, 45s offset)')
 
   // CostOps: reflect the local config's fixed costs into the ledger once at boot + every
   // 10 minutes. Deliberately NOT done inside the GET /api/costs/summary handler -- a read
@@ -366,23 +379,23 @@ export function startWebServer(port = 3420): http.Server {
   const costsSyncInterval = webOnly ? undefined : startCostsSyncTask()
   if (!webOnly) logger.info('CostOps fixed-cost sync started (10min poll + startup)')
 
-  const stuckInputInterval = webOnly ? undefined : startStuckInputWatcher()
-  if (!webOnly) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
+  const stuckInputInterval = agentServicesOn ? startStuckInputWatcher() : undefined
+  if (agentServicesOn) logger.info('Stuck-input watcher started (15s poll, 20s offset)')
 
-  const stuckToolCallInterval = webOnly ? undefined : startStuckToolCallWatcher()
-  if (!webOnly) logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
+  const stuckToolCallInterval = agentServicesOn ? startStuckToolCallWatcher() : undefined
+  if (agentServicesOn) logger.info('Stuck-tool-call watcher started (30s poll, 35s offset)')
 
-  const reauthHealerInterval = webOnly ? undefined : startReauthHealer()
-  if (!webOnly && reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
+  const reauthHealerInterval = agentServicesOn ? startReauthHealer() : undefined
+  if (agentServicesOn && reauthHealerInterval) logger.info('Reauth healer started (3min poll, 90s offset)')
 
-  const autoRestartInterval = webOnly ? undefined : startAutoRestartRunner()
-  if (!webOnly) logger.info('Auto-restart runner started (60s poll, 40s offset)')
+  const autoRestartInterval = agentServicesOn ? startAutoRestartRunner() : undefined
+  if (agentServicesOn) logger.info('Auto-restart runner started (60s poll, 40s offset)')
 
-  const modelFallbackInterval = webOnly ? undefined : startModelFallbackRunner()
-  if (!webOnly) logger.info('Model-fallback runner started (60s poll, 50s offset)')
+  const modelFallbackInterval = agentServicesOn ? startModelFallbackRunner() : undefined
+  if (agentServicesOn) logger.info('Model-fallback runner started (60s poll, 50s offset)')
 
-  const contextGuardInterval = webOnly ? undefined : startContextGuardRunner()
-  if (!webOnly) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
+  const contextGuardInterval = agentServicesOn ? startContextGuardRunner() : undefined
+  if (agentServicesOn) logger.info('Context-guard runner started (5min poll, 4.5min initial delay)')
 
   const updateCheckerInterval = webOnly ? undefined : startUpdateChecker()
   if (!webOnly) logger.info('Update checker started (15min poll)')

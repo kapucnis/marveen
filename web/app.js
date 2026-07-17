@@ -484,6 +484,45 @@ function renderStaticI18n() {
   })
 }
 
+// C2b: reflect AGENT_RUNTIME=none in the dashboard chrome. When the backend
+// reports agentRuntimeAvailable === false (the containerized platform-only
+// deployment, where the tmux agent sessions live on the host, not here), raise a
+// persistent global banner and mark <body> so agent-control affordances can show
+// a disabled state. Any agent-control action still hard-fails server-side (503),
+// this is the user-facing signal so a click is not met with a silent error.
+// Legacy backends omit the field (undefined) -> treated as available, no banner.
+window.applyAgentRuntimeState = function applyAgentRuntimeState() {
+  const unavailable = window._marveen && window._marveen.agentRuntimeAvailable === false
+  let banner = document.getElementById('agentRuntimeBanner')
+  if (unavailable) {
+    if (!banner) {
+      banner = document.createElement('div')
+      banner.id = 'agentRuntimeBanner'
+      banner.className = 'agent-runtime-banner'
+      banner.setAttribute('role', 'status')
+      document.body.prepend(banner)
+    }
+    banner.textContent = (window.t ? window.t('runtime.banner') : 'Agent runtime not available in this deployment -- agent start/stop/restart and the live terminal are disabled here.')
+    banner.hidden = false
+    document.body.classList.add('agent-runtime-unavailable')
+  } else {
+    if (banner) banner.hidden = true
+    document.body.classList.remove('agent-runtime-unavailable')
+  }
+}
+
+// Client-side guard for an agent-control action (start/stop/restart/terminal).
+// Returns true (and toasts) when the host agent runtime is unavailable, so the
+// caller can bail before firing a request that would only 503. Belt-and-braces
+// with the server-side 503 -- the server remains the source of truth.
+window.agentRuntimeBlocked = function agentRuntimeBlocked() {
+  if (window._marveen && window._marveen.agentRuntimeAvailable === false) {
+    if (window.showToast) window.showToast(window.t ? window.t('runtime.blocked') : 'Agent runtime not available in this deployment.')
+    return true
+  }
+  return false
+}
+
 // Initial render on page load.
 document.addEventListener('DOMContentLoaded', () => {
   renderNav()
@@ -672,6 +711,7 @@ async function loadKanban() {
     try {
       const mr = await fetch('/api/marveen')
       if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
+      if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()  // C2b
     } catch { /* ignore -- aging/WIP/swimlanes/labels just won't render until _marveen loads */ }
     if (!kanbanGroupByInitialized) {
       kanbanGroupByInitialized = true
@@ -2388,6 +2428,7 @@ async function loadAgents() {
     agents = await agentsRes.json()
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
+      if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()  // C2b
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
       // hogy ne 'telegram' jelenjen meg amikor a backend discord-on van.
       if (window._marveen?.channelProvider) {
@@ -3083,6 +3124,17 @@ function updateProcessControl(agent) {
   startBtn.hidden = running
   stopBtn.hidden = !running
 
+  // C2b: without a host agent runtime the start/stop control is inert (the
+  // server returns 503), so disable both and explain why on hover.
+  const runtimeOff = window._marveen && window._marveen.agentRuntimeAvailable === false
+  startBtn.disabled = runtimeOff
+  stopBtn.disabled = runtimeOff
+  if (runtimeOff) {
+    const msg = window.t ? t('runtime.blocked') : 'Agent runtime not available in this deployment.'
+    startBtn.title = msg
+    stopBtn.title = msg
+  }
+
   if (running && agent.session) {
     uptime.textContent = `tmux: ${agent.session}`
   } else {
@@ -3091,6 +3143,7 @@ function updateProcessControl(agent) {
 }
 
 document.getElementById('marveenRestartBtn').addEventListener('click', async () => {
+  if (window.agentRuntimeBlocked && window.agentRuntimeBlocked()) return  // C2b
   if (!confirm(t('agents.confirm.hard_restart'))) return
   const btn = document.getElementById('marveenRestartBtn')
   btn.disabled = true
@@ -3110,6 +3163,7 @@ document.getElementById('marveenRestartBtn').addEventListener('click', async () 
 
 document.getElementById('agentStartBtn').addEventListener('click', async () => {
   if (!currentAgent) return
+  if (window.agentRuntimeBlocked && window.agentRuntimeBlocked()) return  // C2b
   const btn = document.getElementById('agentStartBtn')
   btn.disabled = true
   btn.querySelector('.btn-text').hidden = true
@@ -3140,6 +3194,7 @@ document.getElementById('agentStartBtn').addEventListener('click', async () => {
 
 document.getElementById('agentStopBtn').addEventListener('click', async () => {
   if (!currentAgent) return
+  if (window.agentRuntimeBlocked && window.agentRuntimeBlocked()) return  // C2b
   if (!confirm(t('agents.confirm.stop'))) return
 
   try {

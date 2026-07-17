@@ -805,6 +805,9 @@ window._i18n.hu = {
   'network.result.not_private':  'Csak privát (helyi hálózati) IP-cím ellenőrizhető.',
   'network.result.empty':        'Adj meg egy IP-címet.',
   'network.result.error':        'Az ellenőrzés nem sikerült.',
+  // --- Agent runtime nem elerheto (AGENT_RUNTIME=none, C2b) ---
+  'runtime.banner':              'Az agens-futtatokornyezet ebben a telepitesben nem elerheto -- az agens ind: /leallitas/ujraindites es az elo terminal itt le van tiltva.',
+  'runtime.blocked':             'Az agens-futtatokornyezet ebben a telepitesben nem elerheto.',
   // --- Costs (CostOps v0.1, PR #524) ---
   'costs.page_title':            'Költségek',
   'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',

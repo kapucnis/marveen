@@ -6538,3 +6538,21 @@ body {
 .network-result.ok { background: var(--success-soft); border-color: var(--success); color: var(--success); }
 .network-result.warn { background: rgba(200, 150, 40, 0.12); border-color: #c8963c; color: #a8791f; }
 .network-result.err { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+
+/* C2b: global banner shown when AGENT_RUNTIME=none (the containerized platform-only
+   deployment). Sticky at the very top, prominent but not alarming. */
+.agent-runtime-banner {
+  position: sticky;
+  top: 0;
+  z-index: 2000;
+  background: #8a5a00;
+  color: #fff;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  border-bottom: 1px solid #b37400;
+}
+/* Agent-control affordances read as disabled while the runtime is unavailable
+   (the buttons are also disabled in JS; this is the visual cue). */
+body.agent-runtime-unavailable button:disabled { opacity: 0.5; cursor: not-allowed; }

@@ -2,7 +2,7 @@ import { existsSync, unlinkSync, copyFileSync, writeFileSync } from 'node:fs'
 import { join, extname } from 'node:path'
 import {
   PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, MAIN_AGENT_ID, CHANNEL_PROVIDER,
-  KANBAN_LABEL_COLORS,
+  KANBAN_LABEL_COLORS, agentRuntimeAvailable,
 } from '../../config.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackConfig, readMarveenGooglechatConfig, readMarveenTeamsConfig, sendMarveenAvatarChange } from '../telegram.js'
@@ -77,7 +77,12 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       description,
       model: getActiveMarveenModel(),
       tmuxSession: MAIN_CHANNELS_SESSION,
-      running: true,
+      // C2: the main channels session runs on the HOST, not in this deployment.
+      // Under AGENT_RUNTIME=none we cannot inspect it, so report running:null
+      // (unknown) rather than a false `true`, and expose the runtime flag so the
+      // dashboard can raise a global banner + disable the agent-control UI (C2b).
+      running: agentRuntimeAvailable() ? true : null,
+      agentRuntimeAvailable: agentRuntimeAvailable(),
       // Auto-restart applies to the main channels session too; key it by the
       // orchestrator id (autoRestartId, part of idCore) so the UI PUTs to the
       // right store entry.

@@ -543,6 +543,9 @@ window._i18n.en = {
   'network.result.not_private':  'Only private (local network) IP addresses can be checked.',
   'network.result.empty':        'Enter an IP address.',
   'network.result.error':        'The check failed.',
+  // --- Agent runtime unavailable (AGENT_RUNTIME=none, C2b) ---
+  'runtime.banner':              'Agent runtime not available in this deployment -- agent start/stop/restart and the live terminal are disabled here.',
+  'runtime.blocked':             'Agent runtime not available in this deployment.',
   // --- Costs (CostOps v0.1, PR #524) ---
   'costs.page_title':            'Costs',
   'costs.page_subtitle':         'Monthly cost summary from the local config',

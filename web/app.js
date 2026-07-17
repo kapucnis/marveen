@@ -2720,7 +2720,8 @@ function renderAgents() {
     const chLabel = chConnected ? t('agents.status.online') : t('agents.status.offline')
     const isRunning = agent.running || false
     const runDotClass = isRunning ? 'running' : 'stopped'
-    const runLabel = isRunning ? t('agents.status.running') : t('agents.status.stopped')
+    // C2c/F-5: null run-state (AGENT_RUNTIME=none) is unknown, not "stopped" -- no label.
+    const runLabel = agent.running == null ? '' : (isRunning ? t('agents.status.running') : t('agents.status.stopped'))
 
     card.innerHTML = `
       <div class="agent-card-top">
@@ -3120,7 +3121,8 @@ function updateProcessControl(agent) {
   const stopBtn = document.getElementById('agentStopBtn')
 
   dot.className = 'process-dot ' + (running ? 'running' : 'stopped')
-  label.textContent = running ? t('agents.status.running') : t('agents.status.stopped')
+  // C2c/F-5: null run-state (AGENT_RUNTIME=none) is unknown, not "stopped" -- no label.
+  label.textContent = agent.running == null ? '' : (running ? t('agents.status.running') : t('agents.status.stopped'))
   startBtn.hidden = running
   stopBtn.hidden = !running
 

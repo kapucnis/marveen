@@ -87,8 +87,9 @@ try {
   await page.waitForSelector('#agentsGrid .agent-card:not(.add-card)', { timeout: 10000 })
   await page.click('#agentsGrid .agent-card:not(.marveen-card):not(.add-card)')
   await page.waitForTimeout(700)
-  const btn = await page.evaluate(() => { const s = document.getElementById('agentStartBtn'), p = document.getElementById('agentStopBtn'); return { sd: s && s.disabled, pd: p && p.disabled, title: s ? s.title : '' } })
+  const btn = await page.evaluate(() => { const s = document.getElementById('agentStartBtn'), p = document.getElementById('agentStopBtn'); const l = document.getElementById('processLabel'); return { sd: s && s.disabled, pd: p && p.disabled, title: s ? s.title : '', label: l ? (l.textContent || '') : null } })
   assert('F-2 agents page: start/stop disabled + title', btn.sd === true && btn.pd === true && (btn.title || '').length > 0)
+  assert('F-5 status label empty (not "Leállva") under null run-state', btn.label === '', JSON.stringify(btn.label))
   await page.screenshot({ path: join(OUT, 'agents-buttons-disabled.png') })
 
   const toast = await page.evaluate(async () => { const b = document.getElementById('marveenRestartBtn'); if (!b) return {}; b.click(); await new Promise(r => setTimeout(r, 300)); const t = document.getElementById('toast'); return { v: t && t.classList.contains('visible'), text: t ? (t.textContent || '') : '' } })

@@ -6552,6 +6552,11 @@ body {
   line-height: 1.4;
   text-align: center;
   border-bottom: 1px solid #b37400;
+  /* <body> is a CSS grid (grid-template-columns: 220px 1fr). The banner is
+     prepended to <body>, so without spanning it lands in the first grid cell
+     and renders as a tall 220px-wide left column instead of a full-width top
+     bar. Span every column so it reads as the intended sticky top banner. */
+  grid-column: 1 / -1;
 }
 /* Agent-control affordances read as disabled while the runtime is unavailable
    (the buttons are also disabled in JS; this is the visual cue). */

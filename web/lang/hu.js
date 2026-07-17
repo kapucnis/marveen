@@ -806,8 +806,8 @@ window._i18n.hu = {
   'network.result.empty':        'Adj meg egy IP-címet.',
   'network.result.error':        'Az ellenőrzés nem sikerült.',
   // --- Agent runtime nem elerheto (AGENT_RUNTIME=none, C2b) ---
-  'runtime.banner':              'Az agens-futtatokornyezet ebben a telepitesben nem elerheto -- az agens ind: /leallitas/ujraindites es az elo terminal itt le van tiltva.',
-  'runtime.blocked':             'Az agens-futtatokornyezet ebben a telepitesben nem elerheto.',
+  'runtime.banner':              'Az ágens-futtatókörnyezet ebben a telepítésben nem érhető el -- az ágens indítás/leállítás/újraindítás és az élő terminál itt le van tiltva.',
+  'runtime.blocked':             'Az ágens-futtatókörnyezet ebben a telepítésben nem érhető el.',
   // --- Costs (CostOps v0.1, PR #524) ---
   'costs.page_title':            'Költségek',
   'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',

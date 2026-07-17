@@ -28,9 +28,10 @@ tábla, store/claudeclaw.db). A teljes C1-C12 + T1-T9 a **msg 859**-ben; az
 | C1 | Multi-stage Dockerfile + `docker/entrypoint.sh` (store-writable check) + `.dockerignore` | 44a0237 | tsc; konténer-build MÉG NEM (nincs docker a hoston) |
 | C6 | `GET /healthz` (token nélkül, `{ok, db}` SELECT 1) | 44a0237 (`src/web.ts:117`) | endpoint kód kész; `curl -f` smoke a CI-re vár |
 | C2 | AGENT_RUNTIME=none backend: tmux-endpointok explicit 503 + service-gating + degradált status | 099b915 + 45cff49 (teszt 5/5) | `npm test` zöld |
-| C2b | AGENT_RUNTIME=none frontend: sticky banner + agent-control gombok disabled + kliens-guard | f291753 + fbc136c (CSS-fix) | **böngésző-verifikált** (izolált Playwright harness, 11/11 assert + screenshot) |
+| C2b | AGENT_RUNTIME=none frontend: sticky banner + agent-control gombok disabled + kliens-guard | f291753 + fbc136c (CSS-fix) + e214b58 (banner minden nézeten) | **böngésző-verifikált** (izolált Playwright harness, 11/11 + natúr-render 6/6 + screenshot) |
+| C2c | AGENT_RUNTIME=none: onboarding sosem blokkolja a dashboardot (status rövidzár needsOnboarding:false + reason; a 2 onboarding POST 503-guardolva) | a79687c (teszt 3/3, 45cff49 mintára) | `npm test` zöld (a releváns; 2 pre-existing constitution-guard fail környezeti) + natúr-render 6/6 -- **Yoda review folyamatban (msg 1107)** |
 
-C2b-hez tartozó verifikációs harness (NEM commitolt, worktree-lokál):
+C2b-hez tartozó verifikációs harness-ek (NEM commitolt, worktree-lokál):
 `_c2btest/harness.mjs` + screenshotok `_c2btest/out/`. Ez a minta bármely
 worktree-beli UI-verifikációhoz újrahasznosítható (lásd nano memória id 605).
 
@@ -161,12 +162,16 @@ Működő referencia-implementáció: `_c2btest/harness.mjs` (worktree-lokál, n
   (C9) mehet. A tervezés/írás nem igényel dockert, a build/smoke igen.
 - **`sqlite3` CLI SINCS telepítve** a hoston -- a DB-t python3 `sqlite3` modullal
   kell lekérdezni (a `messages` tábla neve `agent_messages`).
-- **Onboarding-finding (AGENT_RUNTIME=none alatt):** a `/api/onboarding/status`
-  `needsOnboarding=true`-t ad, mert `agentsRunning()=false` (nincs konténeres tmux
-  session). Vagyis egy VALÓDI konténerben a first-run onboarding wizard
-  valószínűleg BLOKKOLNÁ a dashboardot (a C2b bannert se látnád). Ezt Yodának
-  jeleztem (msg 1089) mint lehetséges C-blokk-igény (onboarding-skip a konténeres
-  flow-hoz) -- NEM C2b-blokkoló, de a következő tulajdonosnak tisztázni kell.
+- **Onboarding-finding (AGENT_RUNTIME=none alatt) -- MEGOLDVA a C2c-vel (a79687c,
+  Yoda review folyamatban):** eredetileg a `/api/onboarding/status`
+  `needsOnboarding=true`-t adott, mert `agentsRunning()=false` (nincs konténeres tmux
+  session) -> egy VALÓDI konténerben a first-run onboarding wizard BLOKKOLTA volna a
+  dashboardot (a C2b bannert se láttad volna). Yoda döntése (msg 1093): valós
+  konténeres gap, C2c-ként lezárva. Fix: status rövidzár `needsOnboarding:false` +
+  `reason:'agent-runtime-none'` `!agentRuntimeAvailable()` esetén, a 2 onboarding POST
+  503-guardolva. A C2c natúr-render böngésző-check IGAZOLTA hogy az overlay már nem
+  blokkol. (Ez közben kihozott egy külön C2b-gapet: a banner nézet-függő volt, csak
+  Kanban/Ügynökök után jelent meg -> javítva e214b58.)
 - **`git commit -m "$(cat <<EOF...)"` heredoc** a nano-worktree-guard-ot triggeli
   ("redirect-határ nem parse-olható"). Commit-üzenetet fájlba írj és `git commit -F`.
 

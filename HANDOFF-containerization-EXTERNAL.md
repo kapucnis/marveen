@@ -145,13 +145,18 @@ DONE and committed on the containerization branch (`nano/containerize`):
 - **C2** (commit `099b915` backend + `45cff49` tests, 5/5 green): 503 gating + service
   gating + degraded status (`runtimeReason`, `runState:"unknown"`, `running:null`).
   Reviewed & approved.
-- **C2b** (commit `f291753` + CSS fix `fbc136c`): AGENT_RUNTIME=none frontend -- sticky
-  banner + agent-control buttons disabled + client guard. Browser-verified (11/11
-  assertions + screenshot). Formal code review of f291753+fbc136c is pending.
+- **C2b** (commit `f291753` + CSS fix `fbc136c` + `e214b58`): AGENT_RUNTIME=none
+  frontend -- sticky banner + agent-control buttons disabled + client guard. The banner
+  now renders on the initial Overview landing (not only after opening Kanban/Agents).
+  Browser-verified (11/11 + a natural-render 6/6 + screenshots). Formal code review pending.
+- **C2c** (commit `a79687c`): onboarding never blocks the dashboard under
+  AGENT_RUNTIME=none -- `/api/onboarding/status` short-circuits to
+  `{needsOnboarding:false, reason:'agent-runtime-none'}` and the two onboarding POST
+  endpoints return the shared 503. Test 3/3 (modelled on the C2 contract test); review pending.
 
 REMAINING (none started): **C3, C4, C5, C7 (CI secret check), C8, C9 (CI -- do this
 early, it is the only validation path), C10, C11, C12.** No container-level test
-(T1-T9) has run yet -- only unit tests (C2: 5/5) and a browser harness (C2b).
+(T1-T9) has run yet -- only unit tests (C2: 5/5, C2c: 3/3) and browser harnesses (C2b, C2c).
 
 Suggested order (from the reviewer): C2b (done), C3, C4, C5+C12+C7, C8+C11, C9+C10.
 Final-package reminders: C11 grep gate; dev-dependency-free runtime image proof +
@@ -195,13 +200,17 @@ typecheck/parity gate cannot -- e.g. C2b's banner rendered as a tall left column
 instead of a full-width top bar because `<body>` is a CSS grid; the fix was
 `.agent-runtime-banner { grid-column: 1 / -1 }`.
 
-## 7. Open item to resolve before C5 goes live
+## 7. Onboarding gap under AGENT_RUNTIME=none -- RESOLVED (C2c)
 
-Under `AGENT_RUNTIME=none`, the onboarding-status check reports `needsOnboarding=true`
-because `agentsRunning()` is false (no host tmux session in a container). In a real
-container the first-run onboarding wizard would likely BLOCK the dashboard (you would
-not even see the C2b banner). Decide whether the container flow needs an onboarding
-skip/bypass -- clarify with the reviewer before wiring C5/compose.
+Originally: under `AGENT_RUNTIME=none` the onboarding-status check reported
+`needsOnboarding=true` because `agentsRunning()` is false (no host tmux session in a
+container), so the first-run onboarding wizard would have BLOCKED the dashboard (you
+would not even see the C2b banner). This is closed by **C2c** (commit `a79687c`):
+`/api/onboarding/status` short-circuits to `{needsOnboarding:false,
+reason:'agent-runtime-none'}` when the runtime is unavailable, and the onboarding
+mutation POSTs return the shared 503. A natural-render browser check confirmed the
+overlay no longer blocks the dashboard. (Review is pending, but the fix is in place;
+no further action needed here before wiring C5/compose.)
 
 ## 8. First steps for whoever takes over
 

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir, userInfo } from 'node:os'
 import { execFileSync } from 'node:child_process'
-import { PROJECT_ROOT, STORE_DIR } from '../../config.js'
+import { PROJECT_ROOT, STORE_DIR, agentRuntimeAvailable } from '../../config.js'
 import { logger } from '../../logger.js'
 import { resolveFromPath } from '../../platform.js'
 import { atomicWriteFileSync } from '../atomic-write.js'
@@ -10,7 +10,7 @@ import { channelStateDir } from '../../channel-provider.js'
 import { sessionExistsOnHost } from '../agent-process.js'
 import { MAIN_CHANNELS_SESSION } from '../main-agent.js'
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
-import { json, readBody } from '../http-helpers.js'
+import { json, readBody, agentRuntimeUnavailable } from '../http-helpers.js'
 import type { RouteContext } from './types.js'
 
 // First-run onboarding for the "pre-install now, configure later" flow: the
@@ -107,6 +107,15 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
 
   // Onboarding state so the frontend knows which step to show.
   if (path === '/api/onboarding/status' && method === 'GET') {
+    // C2c: in an AGENT_RUNTIME=none deployment the host-side setup (Claude login,
+    // launching the tmux fleet, pairing) does not apply -- the agents run on the
+    // host, not in this container. Report the wizard as satisfied so it never
+    // blocks the dashboard, and say why. The host-dependent probes (agentsRunning
+    // reads tmux) are meaningless here, so we skip them entirely.
+    if (!agentRuntimeAvailable()) {
+      json(res, { needsOnboarding: false, reason: 'agent-runtime-none' })
+      return true
+    }
     const claude = claudeAuthPresent()
     const running = agentsRunning()
     const tg = telegramConfigured()
@@ -124,6 +133,10 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
   // Store a Claude setup-token (OAuth) or API key. The value is NEVER logged or
   // echoed back -- only { ok, verified }. Zero owner/access-config clobber.
   if (path === '/api/onboarding/claude-auth' && method === 'POST') {
+    // C2c: the onboarding mutations exist to bring the host-side fleet up; under
+    // AGENT_RUNTIME=none that runtime is absent, so this endpoint is inert here --
+    // return the same shared 503 as every other tmux-touching route.
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     let body: { token?: string; apiKey?: string } = {}
     try { body = JSON.parse((await readBody(req)).toString()) as typeof body } catch { /* empty */ }
     const token = (body.token ?? '').trim()
@@ -163,6 +176,9 @@ export async function tryHandleOnboarding(ctx: RouteContext): Promise<boolean> {
 
   // Launch the fleet (main-agent channels session). Idempotent: no double-spawn.
   if (path === '/api/onboarding/launch' && method === 'POST') {
+    // C2c: launching the fleet spawns the tmux channels session -- impossible
+    // under AGENT_RUNTIME=none. Guard with the shared runtime-unavailable 503.
+    if (!agentRuntimeAvailable()) { agentRuntimeUnavailable(res); return true }
     if (agentsRunning()) { json(res, { ok: true, alreadyRunning: true }); return true }
     if (!claudeAuthPresent()) { json(res, { error: 'Eloszor allitsd be a Claude-autentikaciot.', reason: 'no-auth' }, 409); return true }
     const r = hardRestartMarveenChannels()

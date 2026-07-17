@@ -10230,6 +10230,14 @@ async function initSidebarBrand() {
     const res = await fetch('/api/marveen')
     if (res.ok) {
       const m = await res.json()
+      // C2b: initSidebarBrand runs at bootstrap on EVERY view (incl. the initial
+      // Overview landing), and already has the /api/marveen payload here. Publish
+      // it + apply the runtime state so the agent-runtime banner shows on first
+      // load regardless of view -- previously it only appeared after opening
+      // Kanban or Agents (their loaders were the only ones calling it), so an
+      // AGENT_RUNTIME=none container landing on Overview showed no banner at all.
+      window._marveen = { ...(window._marveen || {}), ...m }
+      if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()
       const brand = m.brandName || m.name
       // Publish the brand tokens so every t() call ({brand}/{bot}/{agentId})
       // renders the configured names, then re-apply the static i18n so any

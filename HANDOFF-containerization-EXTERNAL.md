@@ -145,18 +145,34 @@ DONE and committed on the containerization branch (`nano/containerize`):
 - **C2** (commit `099b915` backend + `45cff49` tests, 5/5 green): 503 gating + service
   gating + degraded status (`runtimeReason`, `runState:"unknown"`, `running:null`).
   Reviewed & approved.
-- **C2b** (commit `f291753` + CSS fix `fbc136c` + `e214b58`): AGENT_RUNTIME=none
+- **C2b** (commits `f291753` + `fbc136c` + `e214b58` + `70cc857`): AGENT_RUNTIME=none
   frontend -- sticky banner + agent-control buttons disabled + client guard. The banner
-  now renders on the initial Overview landing (not only after opening Kanban/Agents).
-  Browser-verified (11/11 + a natural-render 6/6 + screenshots). Formal code review pending.
-- **C2c** (commit `a79687c`): onboarding never blocks the dashboard under
-  AGENT_RUNTIME=none -- `/api/onboarding/status` short-circuits to
-  `{needsOnboarding:false, reason:'agent-runtime-none'}` and the two onboarding POST
-  endpoints return the shared 503. Test 3/3 (modelled on the C2 contract test); review pending.
+  renders on the initial Overview landing too. Reviewed GO-with-conditions; the blocking
+  finding (banner text was accent-less/truncated) is fixed in `70cc857`, and the
+  agents-page disabled-button screenshot + a restart-button toast check were added.
+  Browser-verified (11/11 + natural-render + an 8-assert review re-run). Re-review in flight.
+- **C2c** (commits `a79687c` + `a5bccd1`): a decided, approved 3-part block that closes
+  the C2 contract. (1) `/api/onboarding/status` short-circuits to
+  `{needsOnboarding:false, reason:'agent-runtime-none'}`; (2) the two onboarding POST
+  endpoints return the shared 503; (3) the Team-panel run-state is runtime-gated --
+  `/api/overview` (agents count + team members) and `/api/team/graph` (main + subs) now
+  report `running: null` instead of a hardcoded `true` / raw tmux probe that would lie in
+  a container, and the UI renders null as no status rather than a false "running/stopped".
+  Contract tests 10/10; browser-verified. Re-review in flight.
 
 REMAINING (none started): **C3, C4, C5, C7 (CI secret check), C8, C9 (CI -- do this
 early, it is the only validation path), C10, C11, C12.** No container-level test
-(T1-T9) has run yet -- only unit tests (C2: 5/5, C2c: 3/3) and browser harnesses (C2b, C2c).
+(T1-T9) has run yet -- only unit contract tests (C2: 5/5, C2c: 3/3, C2c/F-3: 2/2) and
+browser harnesses. A reusable browser harness is committed at
+`scripts/container-verify/verify-agent-runtime-none.mjs` (run after `npm run build`).
+
+NOTE: a full `npm test` shows 2 failures in `claude-constitution-guard.test.ts` -- these
+are ENVIRONMENTAL (it dynamically imports per-agent hook files absent from a fresh
+worktree), NOT a regression, and have their own backlog card. Do not chase them.
+
+POST-DEPLOY CHECK (required): after merge/build, verify on a runtime-AVAILABLE (normal
+host) deployment that the banner does NOT appear and the agent-control buttons are NOT
+disabled -- i.e. the gating only triggers under AGENT_RUNTIME=none.
 
 Suggested order (from the reviewer): C2b (done), C3, C4, C5+C12+C7, C8+C11, C9+C10.
 Final-package reminders: C11 grep gate; dev-dependency-free runtime image proof +

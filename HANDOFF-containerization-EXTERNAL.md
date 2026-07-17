@@ -38,8 +38,8 @@ Approved constraints:
   this is the single mandatory named volume in S2.
 - `WEB_HOST` defaults to `127.0.0.1` -- inside a container that is UNREACHABLE via
   port mapping; compose must set `WEB_HOST=0.0.0.0` + a dashboard token.
-- `TZ=Europe/Budapest` is mandatory env, else every cron schedule shifts (cron is
-  interpreted in node-local TZ).
+- `TZ` is a mandatory env (set it to your deployment's timezone, e.g. `UTC`), else
+  every cron schedule shifts (cron is interpreted in node-local TZ).
 
 ## 3. Full specification (C1-C12) -- authoritative, inline
 
@@ -75,7 +75,7 @@ search falls back to keyword mode via the existing `withEmbedding=0` path).
 Mac/Windows. Optional `ollama` compose profile for hosts without a host Ollama.
 
 **C5 -- docker-compose.** `marveen` service: `env_file: .env`; environment
-`WEB_HOST=0.0.0.0`, `TZ=Europe/Budapest`, `OLLAMA_URL`, `AUTO_UPDATE_ENABLED=0`,
+`WEB_HOST=0.0.0.0`, `TZ=<your-timezone>`, `OLLAMA_URL`, `AUTO_UPDATE_ENABLED=0`,
 `AGENT_RUNTIME=none`; `ports: 127.0.0.1:3420:3420` (see C12); `volumes:
 marveen-store:/app/store`; `extra_hosts` host-gateway; `user: "1000:1000"`;
 `init: true`; `restart: unless-stopped`; `stop_grace_period: 30s`; healthcheck (C6).
@@ -137,7 +137,7 @@ since docker is not available locally). Reviewer inspects the same CI artifacts.
 
 ## 5. Status: what is DONE vs REMAINING
 
-DONE and committed on the containerization branch (`nano/containerize`):
+DONE and committed on the containerization branch (`feat/containerize`):
 - **C1 + C6** (commit `44a0237`): Dockerfile + `docker/entrypoint.sh` (store-writable
   check) + `.dockerignore` + `/healthz`. Reviewed & approved. Final-review still owes
   a CI evidence item: prove the runtime image has NO dev deps (no typescript/vitest/tsx
@@ -208,7 +208,8 @@ a several-minute outage of the live dashboard. Understand this before running an
   an EMPTY store -- if the scenario assumes live data (memory/kanban/agents), SEED it,
   else you verify a false-negative UI state. (Concrete case: an empty store makes the
   app render the first-run ONBOARDING wizard instead of the dashboard -- see below.)
-- A working reference harness exists at `_c2btest/harness.mjs` in the branch.
+- A working reference harness is committed at
+  `scripts/container-verify/verify-agent-runtime-none.mjs` (run after `npm run build`).
 
 Other environment facts: the dev host has NO docker and NO `sqlite3` CLI (query the
 DB via a language sqlite binding). A browser check catches bug classes a
@@ -231,7 +232,7 @@ no further action needed here before wiring C5/compose.)
 ## 8. First steps for whoever takes over
 
 1. Read this whole brief; the spec in section 3 is authoritative and self-contained.
-2. Locate the done code on the `nano/containerize` branch (commits `44a0237`,
+2. Locate the done code on the `feat/containerize` branch (commits `44a0237`,
    `099b915`, `45cff49`, `f291753`, `fbc136c`).
 3. Resolve the section-7 onboarding item with the reviewer.
 4. Pull **C9 (CI) forward** -- it is the ONLY validation path (no local docker).

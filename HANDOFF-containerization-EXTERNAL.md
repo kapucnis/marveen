@@ -137,7 +137,7 @@ since docker is not available locally). Reviewer inspects the same CI artifacts.
 
 ## 5. Status: what is DONE vs REMAINING
 
-DONE and committed on the containerization branch (`feat/containerize`):
+DONE and committed on the containerization branch (`nano/containerize`):
 - **C1 + C6** (commit `44a0237`): Dockerfile + `docker/entrypoint.sh` (store-writable
   check) + `.dockerignore` + `/healthz`. Reviewed & approved. Final-review still owes
   a CI evidence item: prove the runtime image has NO dev deps (no typescript/vitest/tsx
@@ -147,18 +147,19 @@ DONE and committed on the containerization branch (`feat/containerize`):
   Reviewed & approved.
 - **C2b** (commits `f291753` + `fbc136c` + `e214b58` + `70cc857`): AGENT_RUNTIME=none
   frontend -- sticky banner + agent-control buttons disabled + client guard. The banner
-  renders on the initial Overview landing too. Reviewed GO-with-conditions; the blocking
+  renders on the initial Overview landing too. **Reviewed: final GO.** The blocking
   finding (banner text was accent-less/truncated) is fixed in `70cc857`, and the
   agents-page disabled-button screenshot + a restart-button toast check were added.
-  Browser-verified (11/11 + natural-render + an 8-assert review re-run). Re-review in flight.
-- **C2c** (commits `a79687c` + `a5bccd1`): a decided, approved 3-part block that closes
-  the C2 contract. (1) `/api/onboarding/status` short-circuits to
+  Browser-verified (11/11 + natural-render + an 8-assert review re-run).
+- **C2c** (commits `a79687c` + `a5bccd1` + `e026595`): a decided, approved block that
+  closes the C2 contract. (1) `/api/onboarding/status` short-circuits to
   `{needsOnboarding:false, reason:'agent-runtime-none'}`; (2) the two onboarding POST
   endpoints return the shared 503; (3) the Team-panel run-state is runtime-gated --
   `/api/overview` (agents count + team members) and `/api/team/graph` (main + subs) now
   report `running: null` instead of a hardcoded `true` / raw tmux probe that would lie in
-  a container, and the UI renders null as no status rather than a false "running/stopped".
-  Contract tests 10/10; browser-verified. Re-review in flight.
+  a container, and the UI renders null as no status; (4/F-5) the agent modal + card no
+  longer label a null run-state as "stopped" (empty label instead). **Reviewed: final GO.**
+  Contract tests 11/11; browser-verified (harness 11/11).
 
 REMAINING (none started): **C3, C4, C5, C7 (CI secret check), C8, C9 (CI -- do this
 early, it is the only validation path), C10, C11, C12.** No container-level test
@@ -226,15 +227,17 @@ would not even see the C2b banner). This is closed by **C2c** (commit `a79687c`)
 `/api/onboarding/status` short-circuits to `{needsOnboarding:false,
 reason:'agent-runtime-none'}` when the runtime is unavailable, and the onboarding
 mutation POSTs return the shared 503. A natural-render browser check confirmed the
-overlay no longer blocks the dashboard. (Review is pending, but the fix is in place;
-no further action needed here before wiring C5/compose.)
+overlay no longer blocks the dashboard. Reviewed and given final GO; no further
+action needed here before wiring C5/compose.
 
 ## 8. First steps for whoever takes over
 
 1. Read this whole brief; the spec in section 3 is authoritative and self-contained.
-2. Locate the done code on the `feat/containerize` branch (commits `44a0237`,
-   `099b915`, `45cff49`, `f291753`, `fbc136c`).
-3. Resolve the section-7 onboarding item with the reviewer.
+2. Locate the done code on the `nano/containerize` branch. Containerization commits:
+   `44a0237` (C1+C6), `099b915` + `45cff49` (C2), `f291753` + `fbc136c` + `e214b58` +
+   `70cc857` (C2b), `a79687c` + `a5bccd1` + `e026595` (C2c), `f922371` (verify harness).
+3. C1/C6/C2/C2b/C2c are DONE and reviewed (final GO); the onboarding gap (section 7) is
+   closed. Nothing to resolve here -- start from the REMAINING blocks.
 4. Pull **C9 (CI) forward** -- it is the ONLY validation path (no local docker).
 5. Then C5 + C12 (compose builds on the existing C1 Dockerfile/entrypoint), then
    C3/C4, then C8/C11/C10/C7.

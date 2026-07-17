@@ -28,8 +28,8 @@ tábla, store/claudeclaw.db). A teljes C1-C12 + T1-T9 a **msg 859**-ben; az
 | C1 | Multi-stage Dockerfile + `docker/entrypoint.sh` (store-writable check) + `.dockerignore` | 44a0237 | tsc; konténer-build MÉG NEM (nincs docker a hoston) |
 | C6 | `GET /healthz` (token nélkül, `{ok, db}` SELECT 1) | 44a0237 (`src/web.ts:117`) | endpoint kód kész; `curl -f` smoke a CI-re vár |
 | C2 | AGENT_RUNTIME=none backend: tmux-endpointok explicit 503 + service-gating + degradált status | 099b915 + 45cff49 (teszt 5/5) | `npm test` zöld |
-| C2b | AGENT_RUNTIME=none frontend: sticky banner + agent-control gombok disabled + kliens-guard | f291753 + fbc136c + e214b58 + **70cc857 (F-1 HU szöveg)** | **Yoda verdikt KIADVA (msg 1098): GO-FELTÉTELLEL.** F-1 (blokkoló, ékezet nélküli/csonka HU banner) JAVÍTVA (70cc857); F-2 (agents-oldal screenshot + restart-toast) PÓTOLVA; böngésző-verifikált 11/11 + natúr 6/6 + review-harness 8/8. Re-review Yodánál (msg 1111) |
-| C2c | AGENT_RUNTIME=none: FORMÁLIS, JÓVÁHAGYOTT 3-tételes blokk (Yoda döntése msg 1093) -- (1) onboarding-status rövidzár needsOnboarding:false + reason; (2) a 2 onboarding POST 503-guardolva; (3) **F-3: overview + team/graph run-state gate-elés** | a79687c (onboarding, teszt 3/3) + a5bccd1 (F-3 overview/team, teszt 2/2) | konténer-kontraktus tesztek 10/10 + natúr-render harness -- Re-review Yodánál (msg 1111) |
+| C2b | AGENT_RUNTIME=none frontend: sticky banner + agent-control gombok disabled + kliens-guard | f291753 + fbc136c + e214b58 + **70cc857 (F-1 HU szöveg)** | **Yoda verdikt KIADVA (msg 1098): GO-FELTÉTELLEL.** F-1 (blokkoló, ékezet nélküli/csonka HU banner) JAVÍTVA (70cc857); F-2 (agents-oldal screenshot + restart-toast) PÓTOLVA; böngésző-verifikált 11/11 + natúr 6/6 + review-harness 8/8. **Yoda VÉGSŐ GO (msg 1113)** |
+| C2c | AGENT_RUNTIME=none: FORMÁLIS, JÓVÁHAGYOTT blokk (Yoda döntése msg 1093) -- (1) onboarding-status rövidzár needsOnboarding:false + reason; (2) a 2 onboarding POST 503-guardolva; (3) **F-3: overview + team/graph run-state gate-elés**; (4) **F-5: null run-state-nél nincs "Leállva" címke** | a79687c (onboarding, 3/3) + a5bccd1 (F-3, 2/2) + e026595 (F-5) | konténer-kontraktus tesztek 11/11 + natúr-render harness 11/11 -- **Yoda VÉGSŐ GO (msg 1113)** |
 
 C2b-hez tartozó verifikációs harness-ek (NEM commitolt, worktree-lokál):
 `_c2btest/harness.mjs` + screenshotok `_c2btest/out/`. Ez a minta bármely
@@ -93,17 +93,16 @@ scope-jóváhagyás (Laci Q1/Q2) = msg 857.**
   config-helper + közös 503-helper; degradált status `runtimeReason`-nel. A mező-mapping
   (runState:"unknown" + running:null + runtimeReason, míg a CONFIG-status configured/draft
   változatlan) a HELYES értelmezés, jóváhagyva.
-- **C2b** (f291753 + fbc136c + e214b58 + 70cc857) -- **Yoda verdikt KIADVA (msg 1098):
-  GO-FELTÉTELLEL.** Összes futás zöld (tsc, node --check, célzott 5/5, teljes vitest
-  2227/2230 -- a 2 bukás külön backlog, lásd lent), Playwright 11/11, parity, harness
-  4-feltétel. Findingök: F-1 (BLOKKOLÓ, hu.js banner szöveg) JAVÍTVA (70cc857); F-2
-  (agents-oldal screenshot + restart-toast) PÓTOLVA; F-3 -> C2c-be (lásd lent). Re-review
-  Yodánál (msg 1111).
-- **C2c** (a79687c onboarding + a5bccd1 F-3) -- **Yoda döntése (msg 1093): valós konténeres
-  gap, formális 3-tételes blokk, Nano építi az átadás előtt.** Tesztek 10/10 (konténer-
-  kontraktus). F-3-nál diagnózis: a látható Csapat-panel a /api/team/graph-ból renderel
-  (nem az overview.ts team-mezőjéből), ezért team/graph is gate-elve -- a scope-kiterjesztés
-  Yoda re-review-jára vár (msg 1111).
+- **C2b** (f291753 + fbc136c + e214b58 + 70cc857) -- **Yoda VÉGSŐ GO (msg 1113).** A
+  GO-feltétellel verdikt (msg 1098) findingjai átvezetve: F-1 (BLOKKOLÓ, hu.js banner
+  szöveg) JAVÍTVA (70cc857); F-2 (agents-oldal screenshot + restart-toast) PÓTOLVA; F-3
+  -> C2c-be. Összes futás zöld (tsc, node --check, célzott 5/5, Playwright 11/11, parity,
+  harness 4-feltétel).
+- **C2c** (a79687c onboarding + a5bccd1 F-3 + e026595 F-5) -- **Yoda VÉGSŐ GO (msg 1113).**
+  Yoda döntése (msg 1093): valós konténeres gap, formális blokk, Nano építi az átadás
+  előtt. Tesztek 11/11 (konténer-kontraktus). F-3-nál diagnózis: a látható Csapat-panel a
+  /api/team/graph-ból renderel (nem az overview.ts team-mezőjéből), ezért team/graph is
+  gate-elve -- a scope-kiterjesztést Yoda jóváhagyta. F-5: a null run-state már nem "Leállva".
 
 **DEPLOY UTÁNI KÖTELEZŐ ÉLES-CHECK (Yoda kifejezett kérése):** merge/build után eleve
 ellenőrizni kell, hogy egy runtime-AVAILABLE (normál host) ágon a banner NEM jelenik meg
@@ -176,7 +175,7 @@ Működő referencia-implementáció: `_c2btest/harness.mjs` (worktree-lokál, n
 - **`sqlite3` CLI SINCS telepítve** a hoston -- a DB-t python3 `sqlite3` modullal
   kell lekérdezni (a `messages` tábla neve `agent_messages`).
 - **Onboarding-finding (AGENT_RUNTIME=none alatt) -- MEGOLDVA a C2c-vel (a79687c,
-  Yoda review folyamatban):** eredetileg a `/api/onboarding/status`
+  Yoda VÉGSŐ GO msg 1113):** eredetileg a `/api/onboarding/status`
   `needsOnboarding=true`-t adott, mert `agentsRunning()=false` (nincs konténeres tmux
   session) -> egy VALÓDI konténerben a first-run onboarding wizard BLOKKOLTA volna a
   dashboardot (a C2b bannert se láttad volna). Yoda döntése (msg 1093): valós
@@ -200,11 +199,12 @@ Működő referencia-implementáció: `_c2btest/harness.mjs` (worktree-lokál, n
 1. **Olvasd el a teljes specet:** `agent_messages` msg 853-859 (store/claudeclaw.db,
    python3 sqlite3 -- a `sqlite3` CLI NINCS telepítve). A msg 859 a mérvadó C1-C12 +
    T1-T9. Status-térkép a `nano/containerize` git logból (docker-commitok: 44a0237,
-   099b915, 45cff49, f291753, fbc136c, a79687c, e214b58, 70cc857, a5bccd1, f922371).
-2. **C2c KÉSZ (nem nyitott kérdés):** a Yoda-jóváhagyott (msg 1093) 3-tételes C2c blokk
-   MEGVAN (onboarding-status skip+reason a79687c, onboarding POST 503-guard a79687c,
-   overview.ts+team/graph run-state gate a5bccd1), Yoda re-review-ján (msg 1111). Az
-   onboarding-gap NEM blokkolja többé a C5 compose-t. Nincs itt teendő az átvevőnek.
+   099b915, 45cff49, f291753, fbc136c, a79687c, e214b58, 70cc857, a5bccd1, e026595, f922371).
+2. **C2c KÉSZ (nem nyitott kérdés):** a Yoda-jóváhagyott (msg 1093) C2c blokk MEGVAN
+   (onboarding-status skip+reason a79687c, onboarding POST 503-guard a79687c,
+   overview.ts+team/graph run-state gate a5bccd1, F-5 státusz-címke e026595), **Yoda
+   VÉGSŐ GO (msg 1113)**. Az onboarding-gap NEM blokkolja többé a C5 compose-t. Nincs
+   itt teendő az átvevőnek.
 3. **C9 (CI) -- ezt húzd előre**, mert ez az EGYETLEN validációs út (nincs helyi
    docker). GitHub Actions: x86_64+arm64 buildx build + compose-smoke (T1-T9 amennyi
    konténerben futtatható) + C7 titok-check. Yoda a CI-artefaktumokat reviewzza.

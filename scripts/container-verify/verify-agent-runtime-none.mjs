@@ -6,7 +6,7 @@
 //   config reads WEB_PORT from the repo .env (NOT the shell env) so it always
 //   binds 3420, and the index.ts boot calls acquirePortLock(3420) which KILLS the
 //   live dashboard. This harness imports startWebServer DIRECTLY and never boots
-//   index.js. Four mandatory safety conditions (Yoda):
+//   index.js. Four mandatory safety conditions (from the code review):
 //     1. explicit non-3420 port + hard assert before listen (EADDRINUSE-reclaim,
 //        src/web.ts, would SIGTERM the live instance on the default port);
 //     2. WEB_ONLY=true (disables router/scheduler/monitors/hooks/seeding);

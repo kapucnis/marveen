@@ -9586,7 +9586,9 @@ function renderTeamGraph(container, data) {
     if (node.role === 'main') div.classList.add('main')
     else if (node.role === 'leader') div.classList.add('leader')
     const roleLabel = node.role === 'main' ? t('team.role.main') : (node.role === 'leader' ? t('team.role.leader') : t('team.role.member'))
-    const running = node.running ? t('team.running') : t('team.stopped')
+    // C2c/F-3: null == unknown run-state (AGENT_RUNTIME=none container) -- show no
+    // status rather than a false "running"/"stopped" claim.
+    const running = node.running == null ? '' : (node.running ? t('team.running') : t('team.stopped'))
     const avatarUrl = node.id === mainAgentId
       ? `/api/marveen/avatar?t=${Date.now()}`
       : `/api/agents/${encodeURIComponent(node.id)}/avatar?t=${Date.now()}`
@@ -10167,8 +10169,9 @@ async function loadOverview() {
     const res = await fetch('/api/overview')
     if (!res.ok) throw new Error('HTTP ' + res.status)
     const d = await res.json()
-    // Stats
-    document.getElementById('statAgents').textContent = d.agents.running
+    // Stats -- C2c/F-3: running count is null (unknown) under AGENT_RUNTIME=none;
+    // show a neutral placeholder instead of a false number.
+    document.getElementById('statAgents').textContent = d.agents.running == null ? '-' : d.agents.running
     document.getElementById('statAgentsSub').textContent = t('overview.stat.agents_sub', { n: d.agents.total })
     document.getElementById('statTasks').textContent = d.tasksToday
     const taskDiff = d.tasksToday - d.tasksYesterday

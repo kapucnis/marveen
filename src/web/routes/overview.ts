@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { PROJECT_ROOT, MAIN_AGENT_ID, BOT_NAME } from '../../config.js'
+import { PROJECT_ROOT, MAIN_AGENT_ID, BOT_NAME, agentRuntimeAvailable } from '../../config.js'
 import { getDb, countTaskRunsBetween } from '../../db.js'
 import {
   agentDir, listAgentNames, readAgentDisplayName,
@@ -61,8 +61,13 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
   const { res, path, method } = ctx
 
   if (path === '/api/overview' && method === 'GET') {
+    // C2c/F-3: under AGENT_RUNTIME=none the agents run on the host, not in this
+    // container, so run-state here is not knowable -- do NOT assert it (a
+    // hardcoded main running:true + a raw tmux probe both lie in a container).
+    // Report null (unknown), mirroring the C2 route contract.
+    const runtimeOn = agentRuntimeAvailable()
     const subAgents = listAgentNames()
-    const running = subAgents.filter(n => isAgentRunning(n)).length + 1
+    const running = runtimeOn ? subAgents.filter(n => isAgentRunning(n)).length + 1 : null
     const total = subAgents.length + 1
 
     const db0 = getDb()
@@ -119,7 +124,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
     } catch { /* ignore */ }
     activity.sort((a, b) => b.at - a.at)
 
-    const agentsForTeam: Array<{ id: string; label: string; role: string; running: boolean; hasAvatar: boolean; avatarUrl: string }> = []
+    const agentsForTeam: Array<{ id: string; label: string; role: string; running: boolean | null; hasAvatar: boolean; avatarUrl: string }> = []
     const mainHasAvatar = [
       join(PROJECT_ROOT, 'store', 'marveen-avatar.png'),
       join(PROJECT_ROOT, 'store', 'marveen-avatar.jpg'),
@@ -128,7 +133,7 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
       id: MAIN_AGENT_ID,
       label: BOT_NAME,
       role: 'main',
-      running: true,
+      running: runtimeOn ? true : null,
       hasAvatar: mainHasAvatar,
       avatarUrl: `/api/marveen/avatar`,
     })
@@ -138,13 +143,14 @@ export async function tryHandleOverview(ctx: RouteContext): Promise<boolean> {
         id: a,
         label: readAgentDisplayName(a),
         role: team.role,
-        running: isAgentRunning(a),
+        running: runtimeOn ? isAgentRunning(a) : null,
         hasAvatar: existsSync(join(agentDir(a), 'avatar.png')),
         avatarUrl: `/api/agents/${encodeURIComponent(a)}/avatar`,
       })
     }
     json(res, {
       agents: { total, running },
+      runtimeAvailable: runtimeOn,
       tasksToday,
       tasksYesterday,
       memories: { count: memStats.c, categories: memCats.c },

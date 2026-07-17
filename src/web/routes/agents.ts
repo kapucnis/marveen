@@ -1102,13 +1102,18 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
   }
 
   if (path === '/api/team/graph' && method === 'GET') {
+    // C2c/F-3: this graph feeds the visible Team panel (overview + Csapat page).
+    // Under AGENT_RUNTIME=none the agents run on the host, not in this container,
+    // so run-state is unknown here -- report null rather than a hardcoded true
+    // (main) or a raw tmux probe (subs), both of which lie in a container.
+    const runtimeOn = agentRuntimeAvailable()
     const nodes: Array<{
       id: string
       label: string
       role: 'main' | 'leader' | 'member'
       reportsTo: string | null
       delegatesTo: string[]
-      running?: boolean
+      running?: boolean | null
       securityProfile?: string
     }> = []
     nodes.push({
@@ -1117,7 +1122,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
       role: 'main',
       reportsTo: null,
       delegatesTo: [],
-      running: true,
+      running: runtimeOn ? true : null,
     })
     for (const agentName of listAgentNames()) {
       const team = readAgentTeam(agentName)
@@ -1127,7 +1132,7 @@ export async function tryHandleAgents(ctx: RouteContext, webDir: string): Promis
         role: team.role,
         reportsTo: team.reportsTo,
         delegatesTo: team.delegatesTo,
-        running: isAgentRunning(agentName),
+        running: runtimeOn ? isAgentRunning(agentName) : null,
         securityProfile: readAgentSecurityProfile(agentName),
       })
     }

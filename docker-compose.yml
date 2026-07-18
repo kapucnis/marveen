@@ -1,0 +1,88 @@
+# Marveen platform layer (C5). `docker compose up -d` starts the long-running
+# service layer (dashboard, memory, kanban, API, router, guards) only -- the
+# interactive agent sessions (tmux + Claude Code CLI) stay on the HOST and
+# reach this container over the published port. This is S2 (backend-only);
+# see the README containerization section for the full picture and S1 outlook.
+#
+# Before first `up`: copy .env.example to .env and fill it in (same file the
+# host install uses). AGENT_RUNTIME=none below is fixed for this deployment
+# mode -- do not remove it, it is what gates the tmux-touching endpoints/
+# services off (C2). If you already have a HOST .env with AGENT_RUNTIME unset
+# (normal host install), that is a SEPARATE file from a container deployment's
+# .env; do not point env_file at your host install's .env.
+services:
+  marveen:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: marveen:latest
+    env_file:
+      - .env
+    environment:
+      # C12: bind inside the container so the port mapping below can reach it.
+      # The default (127.0.0.1) would be unreachable from outside the
+      # container's own network namespace.
+      WEB_HOST: "0.0.0.0"
+      # Every cron schedule is interpreted in node-local TZ -- set this to your
+      # deployment's real timezone, or every scheduled task fires at the wrong
+      # wall-clock time. Override in your .env if you're not in Budapest.
+      TZ: "${TZ:-Europe/Budapest}"
+      # host.docker.internal + extra_hosts (below) is the Linux answer for
+      # reaching a host-installed Ollama; Docker Desktop (Mac/Windows) provides
+      # host.docker.internal natively, no extra_hosts needed there -- see the
+      # README's Mac/Windows Ollama note. Override in .env to point at the
+      # `ollama` profile service instead (http://ollama:11434) if you're using it.
+      OLLAMA_URL: "${OLLAMA_URL:-http://host.docker.internal:11434}"
+      # This round's opt-in auto-update mechanism assumes a host git checkout +
+      # systemd; it does not apply to a container image. Leave off; redeploy by
+      # rebuilding the image instead.
+      AUTO_UPDATE_ENABLED: "0"
+      # C2: fixed for this deployment mode -- the agent runtime (tmux + Claude
+      # Code CLI) is NOT in this image, it runs on the host. Do not override.
+      AGENT_RUNTIME: "none"
+    ports:
+      # C12: host-only by default -- NOT exposed to the LAN. Publishing beyond
+      # localhost (e.g. "0.0.0.0:3420:3420" or a specific LAN/VPN interface
+      # address) is a deliberate, separate choice -- see the README for that
+      # example and the DASHBOARD_TOKEN requirement that goes with it.
+      - "127.0.0.1:3420:3420"
+    volumes:
+      # C3/C8: the WHOLE store/ (SQLite DB + WAL/SHM, memory, logs, tokens) on
+      # one named volume -- never baked into the image. See
+      # scripts/migrate-store-to-volume.sh to bring an existing host install's
+      # store/ into this volume before first `up`.
+      - marveen-store:/app/store
+    extra_hosts:
+      # Required on Linux for host.docker.internal to resolve (Docker Desktop
+      # on Mac/Windows already provides it). Harmless no-op there.
+      - "host.docker.internal:host-gateway"
+    user: "1000:1000"
+    init: true
+    restart: unless-stopped
+    # Give in-flight requests + the C3 SIGTERM checkpoint+close time to finish
+    # before Docker escalates to SIGKILL (which would skip the checkpoint).
+    stop_grace_period: 30s
+    healthcheck:
+      # C6: token-free, DB-round-trip-only endpoint -- see src/web.ts.
+      test: ["CMD", "curl", "-f", "http://localhost:3420/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # C4: optional, for hosts with no Ollama installed at all. Not started by
+  # default (`docker compose up` alone does NOT start this) -- opt in with
+  # `docker compose --profile ollama up -d`, and point the marveen service's
+  # OLLAMA_URL at it in your .env: OLLAMA_URL=http://ollama:11434
+  ollama:
+    profiles: ["ollama"]
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-data:/root/.ollama
+    restart: unless-stopped
+    # No port published -- only the marveen service (same compose network)
+    # needs to reach it, at the service DNS name "ollama".
+
+volumes:
+  marveen-store:
+  ollama-data:

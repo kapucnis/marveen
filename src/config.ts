@@ -174,6 +174,19 @@ export const WEB_PORT = parseInt(env['WEB_PORT'] ?? '3420', 10)
 
 export const WEB_HOST = env['WEB_HOST'] ?? '127.0.0.1'
 
+// C11: where host-side callers (agents, scripts, CI smoke checks) reach the
+// service layer. Resolution: process env -> repo .env -> this default. ALL
+// code newly written for containerization (C8 migration script, C9 CI
+// compose-smoke, C4/C3 degradation messages that mention a URL, C10 README
+// examples) MUST use this -- hardcoding a URL in new code is not allowed.
+// The ~37 pre-existing hardcoded `localhost:3420` call sites elsewhere in the
+// codebase are a separate, later retrofit (3 mechanisms: TS config-registry
+// key / a shared Python helper lib / docs text) and are deliberately not
+// touched in this round. Note: this is for HOST-SIDE callers reaching the
+// service from outside the container; the in-container /healthz probe (C6)
+// keeps its own literal localhost -- that's a different network namespace.
+export const MARVEEN_API_URL = env['MARVEEN_API_URL'] ?? 'http://localhost:3420'
+
 // C2: AGENT_RUNTIME marks whether the host-side agent runtime (tmux + Claude Code
 // CLI) is reachable from this process. In the container deployment it is set to
 // "none" -- the agent sessions run on the host, not in the image. This is a

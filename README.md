@@ -251,6 +251,124 @@ A token 1 évig érvényes. Ne állíts be `ANTHROPIC_API_KEY`-t mellé.
 - **claude.ai MCP-k**: ha a claude.ai fiókodban sok MCP connector van engedélyezve, a headless claude session megpróbálja betölteni mindet, ami instabilitást okozhat. Telepítés előtt tiltsd le a felesleges MCP-ket a claude.ai Settings oldalán.
 - **Közvetlen futtatás**: `./install-linux.sh` (Linux) vagy `./install-macos.sh` (macOS) ha az OS-detekciót ki akarod hagyni.
 
+## Konténerizálás (Docker)
+
+Ez az **S2 fázis** (platform-réteg, backend-only): a hosszan futó szolgáltatások
+(dashboard, memória, kanban, API, üzenet-router, guard hookok) `docker compose
+up`-pal indíthatók, `.env`-ből konfigurálva, named volume-on perzisztálva. Az
+ágens-sessionök (tmux + Claude Code CLI) **a gazdagépen maradnak** és a
+hálózaton keresztül érik el a konténerizált szolgáltatásokat -- a teljes CLI
+konténerbe költöztetése (**S1**) egy későbbi, külön fázis, ebben a körben nincs
+megvalósítva.
+
+### Gyorsindítás
+
+```bash
+git clone https://github.com/Szotasz/marveen.git
+cd marveen
+cp .env.example .env
+# szerkeszd a .env-et: TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_ID, OWNER_NAME, stb.
+docker compose up -d
+curl http://127.0.0.1:3420/healthz   # {"ok":true,"db":"ok"}
+```
+
+Első indításkor a `store/` üres -- ez egy normál "friss telepítés" (a dashboard
+saját first-run/onboarding folyamata kezeli). Ha egy MEGLÉVŐ, host-alapú
+telepítésről költözöl, a store-t előbb migráld ([lásd lent](#migráció-meglévő-host-telepítésről)),
+NE üres volume-mal indulj.
+
+### Környezeti változók
+
+A `.env`-et ugyanúgy tölti be a konténer (`env_file:`), mint a host-telepítés --
+egyetlen fájl, ugyanaz a formátum. Öt kulcs viszont **rögzített** a
+`docker-compose.yml`-ben, a konténeres üzemmódhoz kötve; ezeket a `.env`-ben
+megadott érték nem írja felül:
+
+| Változó | Rögzített érték | Miért |
+|---|---|---|
+| `WEB_HOST` | `0.0.0.0` | a `127.0.0.1` alapérték a konténeren belül elérhetetlen lenne a port-mapping felől |
+| `AGENT_RUNTIME` | `none` | jelzi, hogy a tmux/Claude Code CLI a gazdagépen fut, nem itt -- ez kapcsolja ki a tmux-érintő végpontokat/szolgáltatásokat |
+| `TZ` | a `.env` `TZ` értéke, alapért. `Europe/Budapest` | minden cron-ütemezés node-lokál TZ-ben értelmeződik |
+| `OLLAMA_URL` | a `.env` `OLLAMA_URL` értéke, alapért. `http://host.docker.internal:11434` | a host-alapértelmezett (`localhost:11434`) a konténeren belül nem a hostot jelentené |
+| `AUTO_UPDATE_ENABLED` | `0` | a host-alapú `update.sh` (git pull + systemd restart) nem értelmezhető image-újraépítésnél; frissítéshez építsd újra az image-et |
+
+Minden más `.env` kulcs (Telegram/Slack tokenek, `OWNER_NAME`, `KANBAN_*`
+beállítások, stb.) ugyanúgy működik, mint a host-telepítésen.
+
+`MARVEEN_API_URL` -- ha a szolgáltatás-réteg később külön szerver-VM-re
+költözik, ez az EGYETLEN dolog, amit a gazdagépen futó ágenseknek/scripteknek
+át kell állítani (alapérték: `http://localhost:3420`).
+
+### Volume és perzisztencia
+
+A teljes `store/` (SQLite adatbázis + WAL/SHM, memória, logok, tokenek) egyetlen
+named volume-on (`marveen-store`) él, **sosem az image-be sütve**. Indításkor a
+szolgáltatás `PRAGMA quick_check`-et fut, majd `wal_checkpoint`-ol; sérült
+adatbázisnál **hangosan, auto-repair nélkül** leáll (időbélyeges másolatot
+mentve a hibás fájlról vizsgálatra) -- ez szándékos: egy rossz automata
+javítás rosszabb, mint egy megállt indítás. `docker compose stop`-nál a
+szolgáltatás checkpointol és bezárja az adatbázist, mielőtt a konténer leáll
+(`init: true` + `stop_grace_period: 30s` ad rá időt).
+
+### Migráció meglévő host-telepítésről
+
+Ha már fut egy host-alapú (nem konténeres) telepítésed, és át akarsz állni
+konténerre:
+
+```bash
+# 1. Állítsd le a HOST szolgáltatást (systemctl stop / launchctl unload / stb.)
+#    -- az adatbázisba írás közben nem szabad másolni.
+# 2. Másold a store/-ot a named volume-ba:
+./scripts/migrate-store-to-volume.sh
+# 3. Indítsd a konténert:
+docker compose up -d
+```
+
+A script **csak másol, sosem töröl** -- a host `store/` könyvtárad érintetlen
+marad, bármi történjen is. Másolás után fájlszám-egyezést és
+`PRAGMA quick_check`-et ellenőriz a bemásolt adatbázison; hiba esetén hangosan
+leáll, a forrás mellé nem is nyúlva. `--dry-run`-nal megnézheted előre, mit
+csinálna; `--help`-pel a teljes opciólista.
+
+### Ollama (szemantikus memória-keresés) Mac/Windows alatt
+
+Linuxon az `extra_hosts: host-gateway` (már benne van a `docker-compose.yml`
+-ben) elég ahhoz, hogy a konténer elérje a host-on futó Ollamát a
+`host.docker.internal` néven. **Docker Desktop (Mac/Windows) ezt natívan
+biztosítja**, nincs extra teendő.
+
+Ha a gépeden egyáltalán nincs Ollama telepítve, egy opcionális `ollama`
+compose-profillal indítható konténerben is:
+
+```bash
+docker compose --profile ollama up -d
+# .env: OLLAMA_URL=http://ollama:11434
+```
+
+Ha Ollama induláskor nem elérhető, a dashboard erről hangos figyelmeztetést ad
+(banner + log), és a keresés automatikusan kulcsszavas módra vált -- ez nem
+blokkolja az indulást, csak a szemantikus keresés minősége csökken.
+
+### S1 kitekintés
+
+Ez a kör (S2) szándékosan **nem** teszi konténerbe az interaktív ágens-
+sessionöket (tmux + Claude Code CLI) -- azok maradnak a gazdagépen, és a
+konténerizált szolgáltatás-réteget hálózaton érik el. A teljes CLI
+konténerbe költöztetése (S1: minden, beleértve az ágens-sessionöket is, egy
+image-ben) egy külön, későbbi kör -- nagyobb scope (pl. Claude Code CLI +
+hitelesítés-kezelés konténerben, tmux-session perzisztencia), erre most nem
+készült terv.
+
+> Ez a szakasz csak a `marveen-store` volume migrálásáról szól. Ha a **teljes
+> flottát** (skillek, per-agent identitás, csatorna-tokenek, stb. is) másik
+> gépre költözteted, azt a [docs/MIGRATION.md](docs/MIGRATION.md) futtatási
+> útmutató írja le végig -- az ottani leltár jelenleg még nem tartalmazza a
+> konténeres `marveen-store` volume-ot (ez a mód még nincs élesítve), a
+> `docker run --rm -v ... alpine cp` mintát viszont már ugyanúgy használja a
+> `projects/loxonTSDB/` compose-stack volume-jaihoz -- ha/amikor a marveen
+> konténeres módra áll, ugyanez az idióma alkalmazható rá is (lásd
+> `scripts/migrate-store-to-volume.sh`).
+
 ## Követelmények
 
 - macOS, Linux, vagy Windows 10/11 (WSL-lel)

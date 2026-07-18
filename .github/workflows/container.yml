@@ -1,0 +1,319 @@
+name: Container (C9)
+
+# C9: the MANDATORY validation path for the containerization work (C1-C12) --
+# the dev host this was built on has no usable docker/docker-compose, so
+# nothing beyond a Dockerfile/YAML syntax read was verified locally. This
+# workflow is the first place T1-T9 actually run.
+#
+# Two jobs: the amd64 job builds natively and runs the full smoke suite
+# (T1-T9); the arm64 job builds under QEMU emulation (no native arm64 runner
+# assumed) and does a reduced boot+healthz check plus image-size reporting --
+# running the full suite under emulation would be slow and mostly re-proves
+# the same application-level behavior the amd64 job already covers in full.
+# If self-hosted or GitHub-native arm64 runners become available, promote the
+# arm64 job to the full suite by copying the amd64 job's smoke steps.
+on:
+  push:
+    branches: [develop, main]
+    paths: &container-paths
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'docker/**'
+      - 'src/**'
+      - 'web/**'
+      - 'templates/**'
+      - 'seed-config/**'
+      - 'scripts/migrate-store-to-volume.sh'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.dockerignore'
+      - '.github/workflows/container.yml'
+  pull_request:
+    paths: *container-paths
+  workflow_dispatch: {}
+
+jobs:
+  build-amd64-and-smoke:
+    runs-on: ubuntu-latest
+    env:
+      # Fixed rather than left to compose's default (derived from the checkout
+      # directory name) -- makes the resulting volume/container names
+      # (marveen-ci_marveen-store, etc.) deterministic across runners instead
+      # of depending on actions/checkout's directory naming.
+      COMPOSE_PROJECT_NAME: marveen-ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # T1: clean build (no cache), tagged to match docker-compose.yml's
+      # `image: marveen:latest` so the compose steps below reuse it as-is
+      # instead of rebuilding.
+      - name: T1 -- build image (amd64, no cache)
+        run: |
+          docker buildx build --platform linux/amd64 -t marveen:latest --no-cache --load .
+
+      - name: Report image size (amd64)
+        run: docker images marveen:latest --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
+
+      - name: Prove the runtime image ships no dev dependency
+        run: |
+          set -euo pipefail
+          for pkg in typescript vitest tsx @playwright/test; do
+            if docker run --rm --entrypoint sh marveen:latest -c "[ -d /app/node_modules/$pkg ]"; then
+              echo "FATAL: dev dependency '$pkg' is present in the runtime image (expected production-only node_modules from the builder's 'npm ci --omit=dev')." >&2
+              exit 1
+            fi
+          done
+          echo "OK: no dev dependency found in the runtime image's node_modules."
+
+      # C7: prove no secret is baked into any layer. Two independent checks:
+      # the build history (RUN/COPY commands, in case a secret was ever
+      # echoed or a stray COPY grabbed it) and the actual final filesystem
+      # (in case a layer added it and a later layer merely deleted the
+      # reference, which docker history text alone would not catch).
+      - name: C7 -- prove no .env / secret is in the image
+        run: |
+          set -euo pipefail
+          docker history --no-trunc marveen:latest > /tmp/history.txt
+          if grep -E '\.env($|[[:space:]/])' /tmp/history.txt | grep -v '\.env\.example'; then
+            echo "FATAL: build history references .env (see above)." >&2
+            exit 1
+          fi
+          echo "OK: build history clean."
+
+          cid=$(docker create marveen:latest)
+          docker export "$cid" -o /tmp/marveen-image.tar
+          docker rm "$cid" >/dev/null
+          mkdir -p /tmp/marveen-image-fs
+          tar -xf /tmp/marveen-image.tar -C /tmp/marveen-image-fs
+          if find /tmp/marveen-image-fs -maxdepth 3 -name '.env' | grep -q .; then
+            echo "FATAL: a .env file exists in the image filesystem (see find output)." >&2
+            find /tmp/marveen-image-fs -maxdepth 3 -name '.env' >&2
+            exit 1
+          fi
+          echo "OK: no .env file in the image filesystem."
+          rm -rf /tmp/marveen-image-fs /tmp/marveen-image.tar
+
+      # T7 (grep half): the "zero NEW hardcoded localhost:3420" gate (C11).
+      # Scoped to the files actually authored/touched for containerization --
+      # a repo-wide grep would also match the ~37 pre-existing sites (a
+      # separate, explicitly out-of-scope backlog item, C11/msg 858) and
+      # every doc/comment that merely mentions the string, which would make
+      # the gate noisy and unmaintainable. One line is a spec-approved
+      # exception (the in-container /healthz probe -- its own network
+      # namespace, C11 explicitly carves this out) and is excluded by line
+      # content, not by skipping the file.
+      - name: T7 -- grep gate, zero new hardcoded localhost:3420
+        run: |
+          set -euo pipefail
+          offenders=$(grep -n 'localhost:3420' \
+            docker-compose.yml \
+            scripts/migrate-store-to-volume.sh \
+            src/ollama-health.ts \
+            src/config.ts \
+            2>/dev/null \
+            | grep -v 'docker-compose.yml:.*healthz' \
+            | grep -v "config.ts:.*MARVEEN_API_URL = env\['MARVEEN_API_URL'\]" \
+            | grep -v 'config.ts:.*pre-existing hardcoded' \
+            || true)
+          if [ -n "$offenders" ]; then
+            echo "FATAL: unexpected hardcoded localhost:3420 outside the approved exceptions:" >&2
+            echo "$offenders" >&2
+            exit 1
+          fi
+          echo "OK: only the spec-approved exceptions (compose healthcheck, MARVEEN_API_URL's own default) reference localhost:3420."
+
+      - name: Prepare .env for compose
+        run: cp .env.example .env
+
+      - name: T2 -- compose up, /healthz green
+        run: |
+          set -euo pipefail
+          docker compose up -d
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /tmp/healthz.json -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          echo "status=$code"; cat /tmp/healthz.json; echo
+          [ "$code" = "200" ]
+          db_ok=$(node -e "console.log(JSON.parse(require('fs').readFileSync('/tmp/healthz.json','utf8')).db)")
+          [ "$db_ok" = "ok" ]
+
+      - name: Fetch dashboard token
+        run: docker compose cp marveen:/app/store/.dashboard-token /tmp/dashboard-token
+
+      - name: T3 -- persistence across down/up
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat /tmp/dashboard-token)
+          MARKER="ci-smoke-t3-${GITHUB_RUN_ID:-local}"
+          curl -sf -X POST http://127.0.0.1:3420/api/memories \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d "{\"agent_id\":\"ci-smoke\",\"content\":\"$MARKER\",\"category\":\"warm\"}" | tee /tmp/t3-write.json
+          docker compose down
+          docker compose up -d
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          [ "$code" = "200" ]
+          found=$(curl -sf "http://127.0.0.1:3420/api/memories?agent_id=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
+          [ "$found" -ge 1 ]
+          # Same read-only quick_check the migration script (C8) and the
+          # service's own startup (C3) use, run against the live volume.
+          docker run --rm --entrypoint node -v marveen-ci_marveen-store:/data:ro marveen:latest \
+            -e 'const D=require("better-sqlite3");const db=new D("/data/claudeclaw.db",{readonly:true});const r=db.pragma("quick_check",{simple:true});if(r!=="ok"){console.error("FAIL:"+r);process.exit(1)}console.log("quick_check: ok")'
+
+      - name: T4 -- .env change takes effect after restart
+        run: |
+          set -euo pipefail
+          echo 'OWNER_NAME=CI-Smoke-Owner' >> .env
+          docker compose up -d
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          [ "$code" = "200" ]
+          TOKEN=$(cat /tmp/dashboard-token)
+          owner=$(curl -sf http://127.0.0.1:3420/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ownerName))')
+          [ "$owner" = "CI-Smoke-Owner" ]
+
+      - name: T5 -- AGENT_RUNTIME=none contract
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat /tmp/dashboard-token)
+          # tmux-touching endpoint -> 503, explicit body, not a silent no-op.
+          code=$(curl -s -o /tmp/t5-503.json -w '%{http_code}' -X POST http://127.0.0.1:3420/api/agents \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"name":"ci-smoke-agent","description":"should 503"}')
+          [ "$code" = "503" ]
+          grep -q 'Agent runtime not available' /tmp/t5-503.json
+          # Message API still 200s + queues in the DB, regardless of runtime.
+          code=$(curl -s -o /tmp/t5-msg.json -w '%{http_code}' -X POST http://127.0.0.1:3420/api/messages \
+            -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+            -d '{"from":"ci-smoke","to":"ci-smoke-2","content":"t5 marker"}')
+          [ "$code" = "200" ]
+          node -e 'let d=require("fs").readFileSync("/tmp/t5-msg.json","utf8");if(!JSON.parse(d).id){console.error("no id in response");process.exit(1)}'
+          # Dashboard banner present in the served HTML shell.
+          html=$(curl -sf "http://127.0.0.1:3420/?token=$TOKEN")
+          echo "$html" | grep -q 'agentRuntimeBanner\|applyAgentRuntimeState' || { echo "FATAL: banner wiring not found in served page" >&2; exit 1; }
+          # Zero tmux calls anywhere in the container's log.
+          if docker compose logs marveen 2>&1 | grep -qi 'tmux'; then
+            echo "FATAL: a 'tmux' mention appeared in the log under AGENT_RUNTIME=none:" >&2
+            docker compose logs marveen 2>&1 | grep -i 'tmux' >&2
+            exit 1
+          fi
+
+      - name: T6 -- Ollama unreachable -> loud degradation, search still works
+        run: |
+          set -euo pipefail
+          TOKEN=$(cat /tmp/dashboard-token)
+          # compose's default OLLAMA_URL (host.docker.internal:11434) has
+          # nothing listening on this runner -> exercises the C4 failure path
+          # for free, no extra config needed.
+          ollama_available=$(curl -sf http://127.0.0.1:3420/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ollamaAvailable))')
+          [ "$ollama_available" = "false" ]
+          docker compose logs marveen 2>&1 | grep -q 'C4: Ollama unreachable at startup'
+          # Keyword search still returns the T3 marker despite no embeddings.
+          MARKER="ci-smoke-t3-${GITHUB_RUN_ID:-local}"
+          found=$(curl -sf "http://127.0.0.1:3420/api/memories?agent_id=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
+          [ "$found" -ge 1 ]
+
+      - name: T7 -- non-root
+        run: |
+          set -euo pipefail
+          uid=$(docker compose exec -T marveen id -u)
+          [ "$uid" = "1000" ]
+
+      - name: T8 -- graceful stop, checkpoint, clean restart
+        run: |
+          set -euo pipefail
+          docker compose stop marveen
+          docker compose logs marveen 2>&1 | grep -q 'C3: shutdown wal_checkpoint(TRUNCATE) ok'
+          # `docker compose ps -a --format json` emits one JSON object per
+          # line; a single service/replica here means exactly one line.
+          exit_code=$(docker compose ps -a --format json marveen | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d.trim().split("\n")[0]).ExitCode))')
+          [ "$exit_code" = "0" ]
+          docker compose up -d
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 2
+          done
+          [ "$code" = "200" ]
+          if docker compose logs marveen 2>&1 | grep -qi 'quick_check FAILED\|C3 FATAL'; then
+            echo "FATAL: a WAL/corruption complaint appeared on restart after a graceful stop." >&2
+            exit 1
+          fi
+
+      - name: T9 -- migration script integrity + source untouched
+        run: |
+          set -euo pipefail
+          docker compose down
+          rm -rf /tmp/ci-store-src
+          docker run --rm -v marveen-ci_marveen-store:/from:ro -v /tmp:/to alpine:latest \
+            sh -c 'mkdir -p /to/ci-store-src && cp -a /from/. /to/ci-store-src/'
+          before_count=$(find /tmp/ci-store-src -type f | wc -l | tr -d ' ')
+          before_sha=$(sha256sum /tmp/ci-store-src/claudeclaw.db | cut -d' ' -f1)
+          docker volume rm marveen-ci_marveen-store
+          ./scripts/migrate-store-to-volume.sh --source /tmp/ci-store-src --volume marveen-ci_marveen-store --image marveen:latest
+          after_count=$(find /tmp/ci-store-src -type f | wc -l | tr -d ' ')
+          after_sha=$(sha256sum /tmp/ci-store-src/claudeclaw.db | cut -d' ' -f1)
+          [ "$before_count" = "$after_count" ]
+          [ "$before_sha" = "$after_sha" ]
+          docker run --rm -v marveen-ci_marveen-store:/to:ro alpine:latest sh -c 'test -f /to/claudeclaw.db'
+          echo "OK: source untouched (count+hash identical), migrated volume has the DB."
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose logs marveen 2>&1 | tail -300
+
+      - name: Teardown
+        if: always()
+        run: docker compose down -v || true
+
+  build-arm64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: T1 -- build image (arm64, QEMU, no cache)
+        run: |
+          docker buildx build --platform linux/arm64 -t marveen:arm64-ci --no-cache --load .
+
+      - name: Report image size (arm64)
+        run: docker images marveen:arm64-ci --format '{{.Repository}}:{{.Tag}}  {{.Size}}'
+
+      - name: Reduced boot check -- /healthz under QEMU
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          docker run -d --name marveen-arm64-smoke --platform linux/arm64 \
+            -e WEB_HOST=0.0.0.0 -e AGENT_RUNTIME=none -e AUTO_UPDATE_ENABLED=0 \
+            --env-file .env -p 127.0.0.1:3421:3420 \
+            -v marveen-arm64-store:/app/store \
+            marveen:arm64-ci
+          code=000
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /tmp/healthz-arm64.json -w '%{http_code}' http://127.0.0.1:3421/healthz || echo 000)
+            if [ "$code" = "200" ]; then break; fi
+            sleep 3
+          done
+          echo "status=$code"; cat /tmp/healthz-arm64.json 2>/dev/null; echo
+          [ "$code" = "200" ]
+
+      - name: Dump logs on failure
+        if: failure()
+        run: docker logs marveen-arm64-smoke 2>&1 | tail -300 || true
+
+      - name: Teardown
+        if: always()
+        run: |
+          docker rm -f marveen-arm64-smoke 2>/dev/null || true
+          docker volume rm marveen-arm64-store 2>/dev/null || true

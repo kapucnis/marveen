@@ -12,6 +12,11 @@
 #   - Refuses to run against a volume that already has files, unless --force
 #     is passed -- prevents silently clobbering an already-migrated or
 #     already-live volume.
+#   - Refuses to run if the host service's own pidfile (store/claudeclaw.pid)
+#     points at a still-alive process, unless --force -- copying a live WAL
+#     mid-write risks a torn snapshot. A missing/stale/unreadable pidfile is
+#     NOT itself an error (most installs won't have one running); only a
+#     CONFIRMED-alive PID blocks.
 #   - Verifies integrity AFTER copying: file count parity (source vs volume)
 #     + `PRAGMA quick_check` on the copied DB (via the same better-sqlite3
 #     build the marveen image ships, run read-only). Any mismatch is a loud
@@ -42,7 +47,7 @@ while [ $# -gt 0 ]; do
     --volume) VOLUME="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
     -h|--help)
-      sed -n '2,28p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) echo "FATAL: unknown argument '$1'" >&2; exit 2 ;;
@@ -76,6 +81,26 @@ echo "   the SQLite DB must not be written to mid-copy (a live WAL means a" \
      "torn snapshot). Stop it however your install manages it (systemctl" \
      "stop / launchctl unload / kill the process), THEN re-run this script."
 echo
+
+# Actually enforce the above, not just print it: check the same pidfile
+# index.ts's acquireLock() writes (store/claudeclaw.pid, same pattern used by
+# scripts/status.ts) for a still-alive process. A stale, unreadable, or
+# missing pidfile is NOT an error -- only a CONFIRMED-alive PID blocks.
+PID_FILE="$SOURCE/claudeclaw.pid"
+if [ -f "$PID_FILE" ]; then
+  live_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+  if [ -n "$live_pid" ] && kill -0 "$live_pid" 2>/dev/null; then
+    if [ "$FORCE" -ne 1 ]; then
+      echo "FATAL: the host service looks like it's still running (PID $live_pid," \
+           "from $PID_FILE, process alive)." >&2
+      echo "       Stop it first, or re-run with --force if you're certain it's" \
+           "safe (e.g. a stale pidfile from a different process that reused" \
+           "the PID -- --force does NOT verify this, it just proceeds)." >&2
+      exit 1
+    fi
+    echo "WARNING: --force set, proceeding despite PID $live_pid appearing alive."
+  fi
+fi
 
 SOURCE_FILE_COUNT="$(find "$SOURCE" -type f | wc -l | tr -d ' ')"
 echo "Source file count: $SOURCE_FILE_COUNT"

@@ -269,7 +269,7 @@ cd marveen
 cp .env.example .env
 # szerkeszd a .env-et: TELEGRAM_BOT_TOKEN, ALLOWED_CHAT_ID, OWNER_NAME, stb.
 docker compose up -d
-curl http://127.0.0.1:3420/healthz   # {"ok":true,"db":"ok"}
+curl "${MARVEEN_API_URL:-http://127.0.0.1:3420}/healthz"   # {"ok":true,"db":"ok"}
 ```
 
 Első indításkor a `store/` üres -- ez egy normál "friss telepítés" (a dashboard
@@ -293,7 +293,10 @@ megadott érték nem írja felül:
 | `AUTO_UPDATE_ENABLED` | `0` | a host-alapú `update.sh` (git pull + systemd restart) nem értelmezhető image-újraépítésnél; frissítéshez építsd újra az image-et |
 
 Minden más `.env` kulcs (Telegram/Slack tokenek, `OWNER_NAME`, `KANBAN_*`
-beállítások, stb.) ugyanúgy működik, mint a host-telepítésen.
+beállítások, stb.) ugyanúgy működik, mint a host-telepítésen. **A `.env`
+módosítása után a konténer(ek) újraindítása szükséges, hogy a változás
+érvénybe lépjen**: `docker compose up -d` (ez a meglévő konténert az új
+környezettel újra létrehozza, a `marveen-store` volume tartalma nem vész el).
 
 `MARVEEN_API_URL` -- ha a szolgáltatás-réteg később külön szerver-VM-re
 költözik, ez az EGYETLEN dolog, amit a gazdagépen futó ágenseknek/scripteknek

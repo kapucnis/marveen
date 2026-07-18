@@ -41,6 +41,14 @@ jobs:
       # (marveen-ci_marveen-store, etc.) deterministic across runners instead
       # of depending on actions/checkout's directory naming.
       COMPOSE_PROJECT_NAME: marveen-ci
+      # C11: every smoke-test call below uses this instead of a hardcoded URL
+      # (the spec names "CI smoke calls" explicitly). 127.0.0.1, not
+      # localhost: matches docker-compose.yml's own published port
+      # (`127.0.0.1:3420:3420`) -- this is the CI runner reaching the
+      # container's PUBLISHED port from the host side, a different context
+      # from the in-container /healthz probe (which stays literal localhost,
+      # its own network namespace, per C11's explicit exception).
+      MARVEEN_API_URL: http://127.0.0.1:3420
     steps:
       - uses: actions/checkout@v4
 
@@ -87,9 +95,13 @@ jobs:
           docker rm "$cid" >/dev/null
           mkdir -p /tmp/marveen-image-fs
           tar -xf /tmp/marveen-image.tar -C /tmp/marveen-image-fs
-          if find /tmp/marveen-image-fs -maxdepth 3 -name '.env' | grep -q .; then
+          # No depth limit -- an earlier version capped at -maxdepth 3, which
+          # stops at /app/node_modules/<pkg> itself and would miss a .env
+          # bundled one level deeper INSIDE a package (or two deeper for a
+          # scoped @org/pkg), silently undercutting the "prove no secret" claim.
+          if find /tmp/marveen-image-fs -name '.env' | grep -q .; then
             echo "FATAL: a .env file exists in the image filesystem (see find output)." >&2
-            find /tmp/marveen-image-fs -maxdepth 3 -name '.env' >&2
+            find /tmp/marveen-image-fs -name '.env' >&2
             exit 1
           fi
           echo "OK: no .env file in the image filesystem."
@@ -103,7 +115,14 @@ jobs:
       # the gate noisy and unmaintainable. One line is a spec-approved
       # exception (the in-container /healthz probe -- its own network
       # namespace, C11 explicitly carves this out) and is excluded by line
-      # content, not by skipping the file.
+      # content, not by skipping the file. Dockerfile and docker/entrypoint.sh
+      # are in scope too (containerization surface area) but currently clean,
+      # so need no exclusions. README.md and this workflow file itself are
+      # DELIBERATELY not in this automated scan -- both contain extensive
+      # pre-existing/self-referential prose that legitimately mentions the
+      # string (e.g. this very step's own name and messages), which would
+      # need an unmaintainable pile of line-content exclusions; the one
+      # genuinely new violation found in README.md was fixed by hand instead.
       - name: T7 -- grep gate, zero new hardcoded localhost:3420
         run: |
           set -euo pipefail
@@ -112,6 +131,8 @@ jobs:
             scripts/migrate-store-to-volume.sh \
             src/ollama-health.ts \
             src/config.ts \
+            Dockerfile \
+            docker/entrypoint.sh \
             2>/dev/null \
             | grep -v 'docker-compose.yml:.*healthz' \
             | grep -v "config.ts:.*MARVEEN_API_URL = env\['MARVEEN_API_URL'\]" \
@@ -132,7 +153,7 @@ jobs:
           set -euo pipefail
           docker compose up -d
           for i in $(seq 1 30); do
-            code=$(curl -s -o /tmp/healthz.json -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            code=$(curl -s -o /tmp/healthz.json -w '%{http_code}' $MARVEEN_API_URL/healthz || echo 000)
             if [ "$code" = "200" ]; then break; fi
             sleep 2
           done
@@ -149,18 +170,18 @@ jobs:
           set -euo pipefail
           TOKEN=$(cat /tmp/dashboard-token)
           MARKER="ci-smoke-t3-${GITHUB_RUN_ID:-local}"
-          curl -sf -X POST http://127.0.0.1:3420/api/memories \
+          curl -sf -X POST $MARVEEN_API_URL/api/memories \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d "{\"agent_id\":\"ci-smoke\",\"content\":\"$MARKER\",\"category\":\"warm\"}" | tee /tmp/t3-write.json
           docker compose down
           docker compose up -d
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            code=$(curl -s -o /dev/null -w '%{http_code}' $MARVEEN_API_URL/healthz || echo 000)
             if [ "$code" = "200" ]; then break; fi
             sleep 2
           done
           [ "$code" = "200" ]
-          found=$(curl -sf "http://127.0.0.1:3420/api/memories?agent_id=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
+          found=$(curl -sf "$MARVEEN_API_URL/api/memories?agent=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
           [ "$found" -ge 1 ]
           # Same read-only quick_check the migration script (C8) and the
           # service's own startup (C3) use, run against the live volume.
@@ -173,38 +194,59 @@ jobs:
           echo 'OWNER_NAME=CI-Smoke-Owner' >> .env
           docker compose up -d
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            code=$(curl -s -o /dev/null -w '%{http_code}' $MARVEEN_API_URL/healthz || echo 000)
             if [ "$code" = "200" ]; then break; fi
             sleep 2
           done
           [ "$code" = "200" ]
           TOKEN=$(cat /tmp/dashboard-token)
-          owner=$(curl -sf http://127.0.0.1:3420/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ownerName))')
+          owner=$(curl -sf $MARVEEN_API_URL/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ownerName))')
           [ "$owner" = "CI-Smoke-Owner" ]
 
       - name: T5 -- AGENT_RUNTIME=none contract
         run: |
           set -euo pipefail
           TOKEN=$(cat /tmp/dashboard-token)
+          # Backend contract flag, the authoritative signal everything else
+          # (the 503 gate, the frontend banner) derives from.
+          rt_avail=$(curl -sf $MARVEEN_API_URL/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).agentRuntimeAvailable))')
+          [ "$rt_avail" = "false" ]
           # tmux-touching endpoint -> 503, explicit body, not a silent no-op.
-          code=$(curl -s -o /tmp/t5-503.json -w '%{http_code}' -X POST http://127.0.0.1:3420/api/agents \
+          code=$(curl -s -o /tmp/t5-503.json -w '%{http_code}' -X POST $MARVEEN_API_URL/api/agents \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d '{"name":"ci-smoke-agent","description":"should 503"}')
           [ "$code" = "503" ]
           grep -q 'Agent runtime not available' /tmp/t5-503.json
           # Message API still 200s + queues in the DB, regardless of runtime.
-          code=$(curl -s -o /tmp/t5-msg.json -w '%{http_code}' -X POST http://127.0.0.1:3420/api/messages \
+          code=$(curl -s -o /tmp/t5-msg.json -w '%{http_code}' -X POST $MARVEEN_API_URL/api/messages \
             -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
             -d '{"from":"ci-smoke","to":"ci-smoke-2","content":"t5 marker"}')
           [ "$code" = "200" ]
           node -e 'let d=require("fs").readFileSync("/tmp/t5-msg.json","utf8");if(!JSON.parse(d).id){console.error("no id in response");process.exit(1)}'
-          # Dashboard banner present in the served HTML shell.
-          html=$(curl -sf "http://127.0.0.1:3420/?token=$TOKEN")
-          echo "$html" | grep -q 'agentRuntimeBanner\|applyAgentRuntimeState' || { echo "FATAL: banner wiring not found in served page" >&2; exit 1; }
-          # Zero tmux calls anywhere in the container's log.
-          if docker compose logs marveen 2>&1 | grep -qi 'tmux'; then
-            echo "FATAL: a 'tmux' mention appeared in the log under AGENT_RUNTIME=none:" >&2
-            docker compose logs marveen 2>&1 | grep -i 'tmux' >&2
+          # Banner wiring shipped in the served app.js. NOTE this only proves
+          # the code exists in the served bundle -- it does NOT prove the
+          # banner actually renders in a real browser DOM (curl doesn't
+          # execute JS, and GET / only serves index.html, which merely
+          # <script src>s app.js -- the wiring functions/ids live entirely in
+          # app.js, never inlined into the HTML, so grepping the HTML for
+          # them can never match). Actual DOM-rendering verification is a
+          # separate, existing local harness
+          # (scripts/container-verify/verify-agent-runtime-none.mjs, uses a
+          # real headless browser) -- this step only guards against the
+          # served JS bundle silently missing the wiring entirely.
+          appjs=$(curl -sf "$MARVEEN_API_URL/app.js")
+          echo "$appjs" | grep -q 'agentRuntimeBanner' || { echo "FATAL: banner wiring not found in served app.js" >&2; exit 1; }
+          echo "$appjs" | grep -q 'applyAgentRuntimeState' || { echo "FATAL: applyAgentRuntimeState not found in served app.js" >&2; exit 1; }
+          # Zero tmux calls anywhere in the container's log -- excluding the
+          # one line the app is SUPPOSED to log under AGENT_RUNTIME=none
+          # (src/web.ts's own "tmux-touching services disabled" announcement,
+          # which legitimately contains the substring "tmux" and fires on
+          # every boot under this deployment mode; a naive unscoped grep
+          # would fail this check on fully correct behavior).
+          tmux_hits=$(docker compose logs marveen 2>&1 | grep -i 'tmux' | grep -v 'tmux-touching services disabled' || true)
+          if [ -n "$tmux_hits" ]; then
+            echo "FATAL: an unexpected 'tmux' mention appeared in the log under AGENT_RUNTIME=none:" >&2
+            echo "$tmux_hits" >&2
             exit 1
           fi
 
@@ -215,12 +257,12 @@ jobs:
           # compose's default OLLAMA_URL (host.docker.internal:11434) has
           # nothing listening on this runner -> exercises the C4 failure path
           # for free, no extra config needed.
-          ollama_available=$(curl -sf http://127.0.0.1:3420/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ollamaAvailable))')
+          ollama_available=$(curl -sf $MARVEEN_API_URL/api/marveen -H "Authorization: Bearer $TOKEN" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d).ollamaAvailable))')
           [ "$ollama_available" = "false" ]
           docker compose logs marveen 2>&1 | grep -q 'C4: Ollama unreachable at startup'
           # Keyword search still returns the T3 marker despite no embeddings.
           MARKER="ci-smoke-t3-${GITHUB_RUN_ID:-local}"
-          found=$(curl -sf "http://127.0.0.1:3420/api/memories?agent_id=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
+          found=$(curl -sf "$MARVEEN_API_URL/api/memories?agent=ci-smoke" -H "Authorization: Bearer $TOKEN" | grep -c "$MARKER" || true)
           [ "$found" -ge 1 ]
 
       - name: T7 -- non-root
@@ -234,13 +276,28 @@ jobs:
           set -euo pipefail
           docker compose stop marveen
           docker compose logs marveen 2>&1 | grep -q 'C3: shutdown wal_checkpoint(TRUNCATE) ok'
-          # `docker compose ps -a --format json` emits one JSON object per
-          # line; a single service/replica here means exactly one line.
-          exit_code=$(docker compose ps -a --format json marveen | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>console.log(JSON.parse(d.trim().split("\n")[0]).ExitCode))')
+          # `docker compose ps --format json` output shape has flip-flopped
+          # across Compose v2 releases -- sometimes NDJSON (one object per
+          # line), sometimes a single-line JSON array. Handle both rather
+          # than assume: parse the whole payload, then unwrap an array to
+          # its first element, or take the first NDJSON line if it wasn't one.
+          exit_code=$(docker compose ps -a --format json marveen | node -e '
+            let d="";
+            process.stdin.on("data",c=>d+=c).on("end",()=>{
+              const trimmed = d.trim();
+              let obj;
+              try {
+                const parsed = JSON.parse(trimmed);
+                obj = Array.isArray(parsed) ? parsed[0] : parsed;
+              } catch {
+                obj = JSON.parse(trimmed.split("\n")[0]);
+              }
+              console.log(obj.ExitCode);
+            })')
           [ "$exit_code" = "0" ]
           docker compose up -d
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3420/healthz || echo 000)
+            code=$(curl -s -o /dev/null -w '%{http_code}' $MARVEEN_API_URL/healthz || echo 000)
             if [ "$code" = "200" ]; then break; fi
             sleep 2
           done

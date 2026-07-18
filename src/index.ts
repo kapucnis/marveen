@@ -353,10 +353,6 @@ const shutdown = (): void => {
     try { stopInviteMonitor() } catch (err) { logger.warn({ err }, 'stopInviteMonitor threw during shutdown') }
     try { stopChannelRequestWatcher() } catch (err) { logger.warn({ err }, 'stopChannelRequestWatcher threw during shutdown') }
     try { stopStoreWatcher() } catch (err) { logger.warn({ err }, 'stopStoreWatcher threw during shutdown') }
-    // C3: checkpoint + close the DB on the way out (SIGTERM from `compose
-    // stop`/a redeploy, or SIGINT). Best-effort by construction (see
-    // closeDatabase) -- never blocks the rest of shutdown.
-    try { closeDatabase() } catch (err) { logger.warn({ err }, 'closeDatabase threw during shutdown') }
     if (decayInterval) clearInterval(decayInterval)
     if (digestTimer) clearTimeout(digestTimer)
     if (digestInterval) clearInterval(digestInterval)
@@ -367,16 +363,25 @@ const shutdown = (): void => {
       process.exit(exitCode || 1)
     }, SHUTDOWN_HARD_KILL_MS)
 
+    // C3: checkpoint + close the DB on the way out (SIGTERM from `compose
+    // stop`/a redeploy, or SIGINT). Deliberately AFTER the web server has
+    // stopped accepting connections (below), not before: closing the DB
+    // first would let a request handler still executing at that instant hit
+    // a closed-connection error mid-handler instead of completing normally
+    // (closing sockets doesn't abort in-flight handler JS). Best-effort by
+    // construction (see closeDatabase) -- never blocks the rest of shutdown.
     if (webServer) {
       try { webServer.closeIdleConnections?.() } catch { /* older node */ }
       try { webServer.closeAllConnections?.() } catch { /* older node */ }
       webServer.close(() => {
+        try { closeDatabase() } catch (err) { logger.warn({ err }, 'closeDatabase threw during shutdown') }
         clearTimeout(hardKill)
         releaseLock()
         process.exit(exitCode)
       })
     } else {
       // Early shutdown, before startWebServer ran. Nothing to drain.
+      try { closeDatabase() } catch (err) { logger.warn({ err }, 'closeDatabase threw during shutdown') }
       clearTimeout(hardKill)
       releaseLock()
       process.exit(exitCode)
@@ -416,7 +421,7 @@ async function main(): Promise<void> {
   // C4: proactive startup healthcheck, best-effort (never blocks/fails boot --
   // an unreachable Ollama is a degradation, not a fatal error). Result is
   // exposed via isOllamaAvailable()/ollamaHealthState() for the dashboard
-  // (GET /api/overview: ollamaAvailable) and logged loudly on failure.
+  // (GET /api/marveen: ollamaAvailable) and logged loudly on failure.
   checkOllamaHealth().catch((err) => logger.warn({ err }, 'checkOllamaHealth threw (treated as unavailable)'))
 
   // Memory decay (24h cycle)

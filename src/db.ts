@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3'
 import { join } from 'node:path'
-import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync, chmodSync, openSync, closeSync, copyFileSync } from 'node:fs'
 import { STORE_DIR, DB_FILENAME, ALLOWED_CHAT_ID, OLLAMA_URL } from './config.js'
 import { getEffectiveSettingValue } from './settings-store.js'
 import { logger } from './logger.js'
@@ -68,6 +68,51 @@ export function initDatabase(dbPathOverride?: string): void {
   db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
   if (!isMemory) tightenDbPermissions(dbPath)
+
+  // C3 (container persistence): on every startup, verify the DB is structurally
+  // sound BEFORE touching schema/data, and checkpoint the WAL into the main file
+  // so a volume snapshot / backup taken right after boot is self-contained.
+  // FAIL-LOUD by design: a corrupt DB gets a timestamped copy (for a human to
+  // inspect or hand to `.recover`) and a hard, unambiguous exit -- NEVER a
+  // silent auto-repair. A bad auto-repair silently loses/rewrites data, which
+  // is worse than refusing to boot. Skipped for ':memory:' (no file, nothing
+  // to check) -- real on-disk override paths (used by permission tests) DO run
+  // it, same as production, since a freshly-created valid SQLite file trivially
+  // passes quick_check.
+  if (!isMemory) {
+    const quickCheckResult = db.pragma('quick_check', { simple: true }) as string
+    if (quickCheckResult !== 'ok') {
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+      const corruptCopyPath = `${dbPath}.corrupt-${stamp}`
+      try { db.close() } catch { /* best-effort, we're exiting either way */ }
+      let copySaved = false
+      try {
+        copyFileSync(dbPath, corruptCopyPath)
+        copySaved = true
+      } catch (copyErr) {
+        logger.error({ copyErr, dbPath }, 'C3: FAILED to save a timestamped copy of the corrupt DB before exiting')
+      }
+      logger.error(
+        { dbPath, corruptCopyPath: copySaved ? corruptCopyPath : undefined, quickCheckResult },
+        'C3 FATAL: SQLite quick_check failed on startup -- the database is corrupt. ' +
+        'No auto-repair was attempted (fail-loud by design). ' +
+        (copySaved
+          ? `A timestamped copy was saved to ${corruptCopyPath} for inspection.`
+          : 'Saving a timestamped copy ALSO failed -- see the copyErr above.') +
+        ' Refusing to boot.'
+      )
+      process.exit(1)
+    }
+    try {
+      db.pragma('wal_checkpoint(TRUNCATE)')
+    } catch (err) {
+      // Non-fatal: a checkpoint failure just means the WAL keeps growing until
+      // the next successful one (e.g. next restart) -- it does not indicate
+      // corruption (quick_check above already ruled that out) and must not
+      // block boot.
+      logger.warn({ err, dbPath }, 'C3: startup wal_checkpoint(TRUNCATE) failed (non-fatal)')
+    }
+  }
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS sessions (
@@ -769,6 +814,27 @@ function migrateTaskRunsFromJson(): void {
 
 export function getDb(): Database.Database {
   return db
+}
+
+// C3: graceful-shutdown counterpart to the startup checkpoint above. Called
+// from index.ts's SIGTERM/SIGINT handler (compose sends SIGTERM on `stop`,
+// `init: true` + a 30s stop_grace_period give this time to run) so a
+// container restart/redeploy always leaves the WAL checkpointed into the main
+// file, not just relying on WAL replay on next boot. Best-effort: a failure
+// here must not prevent shutdown from completing (the next startup's
+// quick_check + checkpoint is the real safety net).
+export function closeDatabase(): void {
+  if (!db) return
+  try {
+    db.pragma('wal_checkpoint(TRUNCATE)')
+  } catch (err) {
+    logger.warn({ err }, 'C3: shutdown wal_checkpoint(TRUNCATE) failed (non-fatal)')
+  }
+  try {
+    db.close()
+  } catch (err) {
+    logger.warn({ err }, 'C3: db.close() during shutdown failed (non-fatal)')
+  }
 }
 
 // --- Munkamenetek ---

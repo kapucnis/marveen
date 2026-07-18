@@ -314,6 +314,15 @@ jobs:
           rm -rf /tmp/ci-store-src
           docker run --rm -v marveen-ci_marveen-store:/from:ro -v /tmp:/to alpine:latest \
             sh -c 'mkdir -p /to/ci-store-src && cp -a /from/. /to/ci-store-src/'
+          # F-1 (Yoda): the copy above retains the CONTAINER's ownership/mode --
+          # claudeclaw.db (+ -wal/-shm/-journal) is chmod 0600 by the app's own
+          # tightenDbPermissions() (src/db.ts), owned by uid 1000 (the image's
+          # non-root user). The CI runner's own shell user is a DIFFERENT uid,
+          # so every host-side read below (find/sha256sum here, and
+          # migrate-store-to-volume.sh's own SOURCE_FILE_COUNT scan two lines
+          # down) would hit "Permission denied" on a fully correct copy.
+          # Re-own to the runner's uid/gid before any host-side read.
+          docker run --rm -v /tmp:/to alpine:latest chown -R "$(id -u):$(id -g)" /to/ci-store-src
           before_count=$(find /tmp/ci-store-src -type f | wc -l | tr -d ' ')
           before_sha=$(sha256sum /tmp/ci-store-src/claudeclaw.db | cut -d' ' -f1)
           docker volume rm marveen-ci_marveen-store

@@ -546,6 +546,8 @@ window._i18n.en = {
   // --- Agent runtime unavailable (AGENT_RUNTIME=none, C2b) ---
   'runtime.banner':              'Agent runtime not available in this deployment -- agent start/stop/restart and the live terminal are disabled here.',
   'runtime.blocked':             'Agent runtime not available in this deployment.',
+  // --- Ollama unreachable at startup (C4) ---
+  'ollama.banner':               'Ollama is unreachable -- semantic memory search is degraded to keyword mode.',
   // --- Costs (CostOps v0.1, PR #524) ---
   'costs.page_title':            'Costs',
   'costs.page_subtitle':         'Monthly cost summary from the local config',

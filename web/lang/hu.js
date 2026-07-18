@@ -808,6 +808,8 @@ window._i18n.hu = {
   // --- Agent runtime nem elerheto (AGENT_RUNTIME=none, C2b) ---
   'runtime.banner':              'Az ágens-futtatókörnyezet ebben a telepítésben nem érhető el -- az ágens indítás/leállítás/újraindítás és az élő terminál itt le van tiltva.',
   'runtime.blocked':             'Az ágens-futtatókörnyezet ebben a telepítésben nem érhető el.',
+  // --- Ollama eleresi hiba induláskor (C4) ---
+  'ollama.banner':               'Az Ollama nem érhető el -- a szemantikus memória-keresés kulcsszavas módra korlátozódik.',
   // --- Costs (CostOps v0.1, PR #524) ---
   'costs.page_title':            'Költségek',
   'costs.page_subtitle':         'Havi költség-összefoglaló a helyi konfigurációból',

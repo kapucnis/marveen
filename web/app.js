@@ -523,6 +523,44 @@ window.agentRuntimeBlocked = function agentRuntimeBlocked() {
   return false
 }
 
+// C4: reflect a failed startup Ollama healthcheck in the dashboard chrome.
+// Coexists with the C2b agent-runtime banner (separate element/id) -- both
+// can show at once (e.g. a container with no host Ollama configured yet).
+// Informational only: semantic search degrades to keyword mode, nothing is
+// disabled, so unlike agentRuntimeBlocked() there is no corresponding guard.
+//
+// Stacking note: both banners are `position: sticky; top: 0`, which does NOT
+// auto-stack same-top sticky siblings -- they'd overlap if both showed at
+// once. Fixed by (1) always inserting this banner right after the
+// agent-runtime banner (insertAdjacentElement, not prepend, so DOM order is
+// deterministic regardless of which apply* ran/created its element first),
+// and (2) offsetting THIS banner's `top` by the agent-runtime banner's live
+// rendered height when both are visible, 0 otherwise.
+window.applyOllamaHealthState = function applyOllamaHealthState() {
+  const degraded = window._marveen && window._marveen.ollamaAvailable === false
+  let banner = document.getElementById('ollamaHealthBanner')
+  if (degraded) {
+    if (!banner) {
+      banner = document.createElement('div')
+      banner.id = 'ollamaHealthBanner'
+      banner.className = 'ollama-health-banner'
+      banner.setAttribute('role', 'status')
+      const runtimeBanner = document.getElementById('agentRuntimeBanner')
+      if (runtimeBanner) runtimeBanner.insertAdjacentElement('afterend', banner)
+      else document.body.prepend(banner)
+    }
+    banner.textContent = window.t ? window.t('ollama.banner') : 'Ollama is unreachable -- semantic memory search is degraded to keyword mode.'
+    banner.hidden = false
+  } else if (banner) {
+    banner.hidden = true
+  }
+  const runtimeBanner = document.getElementById('agentRuntimeBanner')
+  if (banner) {
+    const runtimeVisible = runtimeBanner && !runtimeBanner.hidden
+    banner.style.top = (runtimeVisible ? runtimeBanner.offsetHeight : 0) + 'px'
+  }
+}
+
 // Initial render on page load.
 document.addEventListener('DOMContentLoaded', () => {
   renderNav()
@@ -712,6 +750,7 @@ async function loadKanban() {
       const mr = await fetch('/api/marveen')
       if (mr.ok) window._marveen = { ...(window._marveen || {}), ...(await mr.json()) }
       if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()  // C2b
+      if (window.applyOllamaHealthState) window.applyOllamaHealthState()  // C4
     } catch { /* ignore -- aging/WIP/swimlanes/labels just won't render until _marveen loads */ }
     if (!kanbanGroupByInitialized) {
       kanbanGroupByInitialized = true
@@ -2429,6 +2468,7 @@ async function loadAgents() {
     if (marveenRes.ok) {
       window._marveen = await marveenRes.json()
       if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()  // C2b
+      if (window.applyOllamaHealthState) window.applyOllamaHealthState()  // C4
       // A backend CHANNEL_PROVIDER-éhez igazitsuk a kliens-default-ot,
       // hogy ne 'telegram' jelenjen meg amikor a backend discord-on van.
       if (window._marveen?.channelProvider) {
@@ -10243,6 +10283,7 @@ async function initSidebarBrand() {
       // AGENT_RUNTIME=none container landing on Overview showed no banner at all.
       window._marveen = { ...(window._marveen || {}), ...m }
       if (window.applyAgentRuntimeState) window.applyAgentRuntimeState()
+      if (window.applyOllamaHealthState) window.applyOllamaHealthState()  // C4
       const brand = m.brandName || m.name
       // Publish the brand tokens so every t() call ({brand}/{bot}/{agentId})
       // renders the configured names, then re-apply the static i18n so any

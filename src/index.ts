@@ -11,6 +11,7 @@ import { execFileSync, execSync } from 'node:child_process'
 import type { Server as HttpServer } from 'node:http'
 import { STORE_DIR, PID_FILENAME, WEB_PORT, ALLOWED_CHAT_ID, MAIN_AGENT_ID, RESPAWN_ENABLED, HEARTBEAT_AGENT_ENABLED, agentRuntimeAvailable } from './config.js'
 import { initDatabase, closeDatabase } from './db.js'
+import { checkOllamaHealth } from './ollama-health.js'
 import { runDecaySweep, runDailyDigest } from './memory.js'
 import { initHeartbeat, stopHeartbeat } from './heartbeat.js'
 import { ensureHeartbeatAgent, shouldBootHeartbeatAgent, HEARTBEAT_AGENT_NAME } from './web/heartbeat-agent-scaffold.js'
@@ -411,6 +412,12 @@ async function main(): Promise<void> {
   // Database
   initDatabase()
   logger.info('Adatbazis inicializalva')
+
+  // C4: proactive startup healthcheck, best-effort (never blocks/fails boot --
+  // an unreachable Ollama is a degradation, not a fatal error). Result is
+  // exposed via isOllamaAvailable()/ollamaHealthState() for the dashboard
+  // (GET /api/overview: ollamaAvailable) and logged loudly on failure.
+  checkOllamaHealth().catch((err) => logger.warn({ err }, 'checkOllamaHealth threw (treated as unavailable)'))
 
   // Memory decay (24h cycle)
   runDecaySweep()

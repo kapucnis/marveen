@@ -4,6 +4,7 @@ import {
   PROJECT_ROOT, OWNER_NAME, BOT_NAME, BRAND_NAME, MAIN_AGENT_ID, CHANNEL_PROVIDER,
   KANBAN_LABEL_COLORS, agentRuntimeAvailable,
 } from '../../config.js'
+import { isOllamaAvailable } from '../../ollama-health.js'
 import { getEffectiveSettingValue } from '../../settings-store.js'
 import { readMarveenTelegramConfig, readMarveenDiscordConfig, readMarveenSlackConfig, readMarveenGooglechatConfig, readMarveenTeamsConfig, sendMarveenAvatarChange } from '../telegram.js'
 import { hardRestartMarveenChannels } from '../channel-monitor.js'
@@ -83,6 +84,11 @@ export async function tryHandleMarveen(ctx: RouteContext, webDir: string): Promi
       // dashboard can raise a global banner + disable the agent-control UI (C2b).
       running: agentRuntimeAvailable() ? true : null,
       agentRuntimeAvailable: agentRuntimeAvailable(),
+      // C4: whether the startup Ollama healthcheck succeeded -- drives the
+      // (separate, coexisting) Ollama-degraded banner. Semantic/embedding
+      // search still works when this is false, it just falls back to keyword
+      // mode; this is a visibility signal, not a hard gate like the field above.
+      ollamaAvailable: isOllamaAvailable(),
       // Auto-restart applies to the main channels session too; key it by the
       // orchestrator id (autoRestartId, part of idCore) so the UI PUTs to the
       // right store entry.

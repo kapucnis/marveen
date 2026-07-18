@@ -6561,3 +6561,24 @@ body {
 /* Agent-control affordances read as disabled while the runtime is unavailable
    (the buttons are also disabled in JS; this is the visual cue). */
 body.agent-runtime-unavailable button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* C4: informational banner when the startup Ollama healthcheck failed. Muted
+   (blue-grey) rather than the agent-runtime banner's amber -- this is a
+   degradation (keyword-search fallback), not a disabled-functionality
+   warning. Can be sticky-stacked below the agent-runtime banner if both are
+   showing (both are `position: sticky; top: 0`, and DOM order -- this one is
+   prepended first at the JS call sites' ordering -- puts it second, so the
+   browser stacks it directly under the first). */
+.ollama-health-banner {
+  position: sticky;
+  top: 0;
+  z-index: 1999;
+  background: #3d5a73;
+  color: #fff;
+  padding: 8px 16px;
+  font-size: 13px;
+  line-height: 1.4;
+  text-align: center;
+  border-bottom: 1px solid #4d7192;
+  grid-column: 1 / -1;
+}

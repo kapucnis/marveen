@@ -827,6 +827,10 @@ export function closeDatabase(): void {
   if (!db) return
   try {
     db.pragma('wal_checkpoint(TRUNCATE)')
+    // Success is logged (not just the failure path) so a container's
+    // `docker compose stop` / SIGTERM has an observable, greppable signal
+    // that the checkpoint actually ran -- used by C9's T8 smoke test.
+    logger.info('C3: shutdown wal_checkpoint(TRUNCATE) ok')
   } catch (err) {
     logger.warn({ err }, 'C3: shutdown wal_checkpoint(TRUNCATE) failed (non-fatal)')
   }

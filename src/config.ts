@@ -12,7 +12,23 @@ export const STORE_DIR = join(PROJECT_ROOT, 'store')
 export const DB_FILENAME = 'claudeclaw.db'
 export const PID_FILENAME = 'claudeclaw.pid'
 
-const env = readEnvFile()
+// Boot-time config resolution: process env wins, then the repo-root .env file,
+// then each key's own default below. This is a container prerequisite (found
+// while wiring C5/docker-compose): readEnvFile() only ever reads a physical
+// .env FILE, but `docker compose`'s `environment:`/`env_file:` set the
+// container's process env -- they never materialize /app/.env inside the
+// image (which .dockerignore excludes anyway, C7). Without this layer,
+// AGENT_RUNTIME=none and WEB_HOST=0.0.0.0 supplied via compose would
+// silently no-op and the container would boot in the wrong mode. Deliberately
+// NOT changed in env.ts itself: readEnvFile() has other callers
+// (settings-store.ts, inbound-probe.ts) that specifically want the raw file
+// content (e.g. the Settings page diffs "what does .env say" against the
+// live override), and env.test.ts asserts readEnvFile() reflects file
+// content only -- merging process.env there would change that contract.
+const env: Record<string, string> = { ...readEnvFile() }
+for (const [key, value] of Object.entries(process.env)) {
+  if (value !== undefined) env[key] = value
+}
 
 // Boot-time settings-override layer. The dashboard Settings page persists
 // changes to store/config-overrides.json. config.ts is imported too early to
